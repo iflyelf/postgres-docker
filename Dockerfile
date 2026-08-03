@@ -194,7 +194,10 @@ RUN set -eux && \
 
 # ***** 配置 postgres 用户与目录 *****
 RUN set -eux && \
-    # 创建 postgres 用户（UID/GID=999，兼容 Percona Operator 和标准 PG 镜像）
+    # Percona/PostgreSQL 包安装时可能已创建 postgres 用户/组（UID 不定），
+    # 先清理再以固定 UID/GID=999 重建（兼容 Percona Operator 和标准 PG 镜像）
+    if id postgres > /dev/null 2>&1; then userdel -r postgres 2>/dev/null || userdel postgres; fi && \
+    if getent group postgres > /dev/null 2>&1; then groupdel postgres 2>/dev/null || true; fi && \
     groupadd -r postgres --gid=999 && \
     useradd -r -g postgres --uid=999 --home-dir=${PGHOME} --shell=/bin/zsh postgres && \
     # 创建目录结构
