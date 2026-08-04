@@ -49,15 +49,26 @@ docker-image/
 ### 独立测试
 
 ```bash
-# conf 格式（默认）
-./scripts/postgresql-config-tuner.sh
-
-# Patroni YAML 片段格式
+# 1. 自动探测容器 cgroup 限制（默认）
 ./scripts/postgresql-config-tuner.sh --patroni
 
-# 模拟指定 max_connections
-PG_MAX_CONNECTIONS=1000 ./scripts/postgresql-config-tuner.sh
+# 2. 手动指定 CPU/内存（支持 K8s 资源格式：8Gi/4/500m 等）
+PG_MEMORY_LIMIT=8Gi PG_CPU_LIMIT=4 ./scripts/postgresql-config-tuner.sh --patroni
+
+# 3. 混合模式：仅指定内存，CPU 自动探测
+PG_MEMORY_LIMIT=16Gi ./scripts/postgresql-config-tuner.sh --patroni
+
+# 4. 模拟指定 max_connections（默认 10000）
+PG_MAX_CONNECTIONS=1000 PG_MEMORY_LIMIT=8Gi PG_CPU_LIMIT=4 ./scripts/postgresql-config-tuner.sh --patroni
+
+# 5. 输出 postgresql.conf 格式（默认）
+PG_MEMORY_LIMIT=8Gi PG_CPU_LIMIT=4 ./scripts/postgresql-config-tuner.sh conf
 ```
+
+**说明：**
+- `PG_MEMORY_LIMIT` / `PG_CPU_LIMIT` 未指定时，自动从容器 cgroup 探测（优先 v2，回退 v1）
+- 手动指定支持 K8s 格式：内存(8Gi/4096Mi/...)、CPU(4/2.5/500m/...)
+- 此脚本与 `../update-pg-params.py` 计算公式完全一致，相同输入产出完全相同结果
 
 ## 本地构建
 

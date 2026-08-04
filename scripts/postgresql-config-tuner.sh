@@ -1,16 +1,61 @@
 #!/usr/bin/env bash
 #=================================================
 # PostgreSQL 配置动态调优脚本
-# 功能：根据容器实际 CPU/内存限制自动计算 PostgreSQL 参数
+# 功能：根据 CPU/内存限制自动计算 PostgreSQL 参数
 # 参考生产 postgresql.base.conf 的计算公式：
 #   shared_buffers      = 内存 * 25%
 #   effective_cache_size = 内存 * 75%
 #   maintenance_work_mem = 内存 * 5%（上限 2GB）
 #   work_mem            = (内存 * 25%) / max_connections / 并发因子
+#
+# CPU/内存来源（优先级从高到低）：
+#   1. 命令行/环境变量手动指定：PG_MEMORY_LIMIT / PG_CPU_LIMIT（支持 8Gi/4/500m 等 K8s 格式）
+#   2. 自动探测容器 cgroup 限制（v2 优先，回退 v1）
+#   3. 回退宿主机 /proc/meminfo 和 nproc
+#
 # 输出：可被 Patroni dynamicConfiguration 或 postgresql.conf 使用的参数
+#
+# 用法：
+#   postgresql-config-tuner.sh [conf|--patroni]          # 自动探测
+#   PG_MEMORY_LIMIT=8Gi PG_CPU_LIMIT=4 postgresql-config-tuner.sh --patroni  # 手动指定
 #=================================================
 
 set -euo pipefail
+
+# ==============================================================================
+# 0. K8s 资源格式解析（8Gi/4096Mi/500m/4 → 字节 / 核数）
+# ==============================================================================
+# K8s 内存格式 → 字节
+parse_memory_to_bytes() {
+    local s="$1"
+    case "$s" in
+        *Ki) echo "$(( ${s%Ki} * 1024 ))" ;;
+        *Mi) echo "$(( ${s%Mi} * 1024 * 1024 ))" ;;
+        *Gi) echo "$(( ${s%Gi} * 1024 * 1024 * 1024 ))" ;;
+        *Ti) echo "$(( ${s%Ti} * 1024 * 1024 * 1024 * 1024 ))" ;;
+        *K)  echo "$(( ${s%K} * 1000 ))" ;;
+        *M)  echo "$(( ${s%M} * 1000 * 1000 ))" ;;
+        *G)  echo "$(( ${s%G} * 1000 * 1000 * 1000 ))" ;;
+        *T)  echo "$(( ${s%T} * 1000 * 1000 * 1000 * 1000 ))" ;;
+        *)   echo "$s" ;;  # 纯字节
+    esac
+}
+
+# K8s CPU 格式 → 核数（向上取整，至少 1）
+parse_cpu_to_cores() {
+    local s="$1"
+    if [[ "$s" == *m ]]; then
+        # 毫核，向上取整
+        local milli="${s%m}"
+        echo "$(( (milli + 999) / 1000 ))"
+    else
+        # 可能是浮点(如 2.5)，取整数部分，至少 1
+        local intpart="${s%%.*}"
+        [ -z "$intpart" ] && intpart=0
+        [ "$intpart" -lt 1 ] && intpart=1
+        echo "$intpart"
+    fi
+}
 
 # ==============================================================================
 # 1. 探测容器可用内存（字节）
@@ -86,8 +131,23 @@ detect_cpu_count() {
 # ==============================================================================
 # 3. 计算 PostgreSQL 参数
 # ==============================================================================
-MEM_BYTES="$(detect_memory_bytes)"
-CPU_COUNT="$(detect_cpu_count)"
+# 内存：优先手动指定 PG_MEMORY_LIMIT，否则自动探测
+if [ -n "${PG_MEMORY_LIMIT:-}" ]; then
+    MEM_BYTES="$(parse_memory_to_bytes "${PG_MEMORY_LIMIT}")"
+    MEM_SOURCE="手动指定 ${PG_MEMORY_LIMIT}"
+else
+    MEM_BYTES="$(detect_memory_bytes)"
+    MEM_SOURCE="自动探测"
+fi
+
+# CPU：优先手动指定 PG_CPU_LIMIT，否则自动探测
+if [ -n "${PG_CPU_LIMIT:-}" ]; then
+    CPU_COUNT="$(parse_cpu_to_cores "${PG_CPU_LIMIT}")"
+    CPU_SOURCE="手动指定 ${PG_CPU_LIMIT}"
+else
+    CPU_COUNT="$(detect_cpu_count)"
+    CPU_SOURCE="自动探测"
+fi
 
 MEM_MB="$((MEM_BYTES / 1024 / 1024))"
 
@@ -156,7 +216,7 @@ FORMAT="${1:-conf}"
 
 if [ "$FORMAT" = "--patroni" ] || [ "$FORMAT" = "yaml" ]; then
     cat <<YAML
-# 由 postgresql-config-tuner.sh 自动生成（内存 ${MEM_MB}MB / CPU ${CPU_COUNT} 核）
+# 由 postgresql-config-tuner.sh 自动生成（内存 ${MEM_MB}MB[${MEM_SOURCE}] / CPU ${CPU_COUNT} 核[${CPU_SOURCE}]）
         shared_buffers: ${SHARED_BUFFERS_MB}MB
         effective_cache_size: ${EFFECTIVE_CACHE_SIZE_MB}MB
         maintenance_work_mem: ${MAINTENANCE_WORK_MEM_MB}MB
@@ -170,7 +230,7 @@ if [ "$FORMAT" = "--patroni" ] || [ "$FORMAT" = "yaml" ]; then
 YAML
 else
     cat <<CONF
-# 由 postgresql-config-tuner.sh 自动生成（内存 ${MEM_MB}MB / CPU ${CPU_COUNT} 核）
+# 由 postgresql-config-tuner.sh 自动生成（内存 ${MEM_MB}MB[${MEM_SOURCE}] / CPU ${CPU_COUNT} 核[${CPU_SOURCE}]）
 shared_buffers = '${SHARED_BUFFERS_MB}MB'
 effective_cache_size = '${EFFECTIVE_CACHE_SIZE_MB}MB'
 maintenance_work_mem = '${MAINTENANCE_WORK_MEM_MB}MB'
