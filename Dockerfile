@@ -140,7 +140,13 @@ RUN set -eux && \
    # 配置 locale（生成 zh_CN.UTF-8 和 en_US.UTF-8，兼容 Percona Operator）
    locale-gen zh_CN.UTF-8 && localedef -f UTF-8 -i zh_CN zh_CN.UTF-8 && \
    locale-gen en_US.UTF-8 && localedef -f UTF-8 -i en_US en_US.UTF-8 && \
-   locale-gen
+   locale-gen && \
+   # 创建 libnss_wrapper.so 软链接到 Operator 期望的 /usr/lib64 路径
+   # Percona Operator 硬编码 LD_PRELOAD=/usr/lib64/libnss_wrapper.so（RHEL 路径），
+   # 但 Ubuntu 装在 /usr/lib/<arch>/ 下，需软链接以消除 LD_PRELOAD 加载失败告警
+   mkdir -p /usr/lib64 && \
+   NSS_WRAPPER_LIB="$(find /usr/lib -name 'libnss_wrapper.so' 2>/dev/null | head -1)" && \
+   ln -sf "${NSS_WRAPPER_LIB}" /usr/lib64/libnss_wrapper.so
 
 # ***** 安装 Percona PostgreSQL + TimescaleDB *****
 RUN set -eux && \
