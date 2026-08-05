@@ -137,8 +137,10 @@ RUN set -eux && \
    sed -i -e "s/bin\/ash/bin\/zsh/" /etc/passwd && \
    # vim 默认配置文件存在时才关闭 mouse（不同版本路径不同，用 find 定位）
    find /usr/share/vim -name defaults.vim -exec sed -i -e 's/mouse=/mouse-=/g' {} + && \
-   # 配置中文 locale
-   locale-gen zh_CN.UTF-8 && localedef -f UTF-8 -i zh_CN zh_CN.UTF-8 && locale-gen
+   # 配置 locale（生成 zh_CN.UTF-8 和 en_US.UTF-8，兼容 Percona Operator）
+   locale-gen zh_CN.UTF-8 && localedef -f UTF-8 -i zh_CN zh_CN.UTF-8 && \
+   locale-gen en_US.UTF-8 && localedef -f UTF-8 -i en_US en_US.UTF-8 && \
+   locale-gen
 
 # ***** 安装 Percona PostgreSQL + TimescaleDB *****
 RUN set -eux && \
