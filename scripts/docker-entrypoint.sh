@@ -10,6 +10,14 @@
 
 set -euo pipefail
 
+# ==============================================================================
+# 修正 Percona Operator 3.0.0 注入的错误 locale
+# Bug: Operator 硬编码 LANG/LC_ALL=en_US.utf-8（小写 utf-8，无效）
+# Fix: 强制使用镜像内置的正确 locale zh_CN.UTF-8
+# ==============================================================================
+export LANG=zh_CN.UTF-8
+export LC_ALL=zh_CN.UTF-8
+
 PGHOME="${PGHOME:-/data/postgres}"
 PGDATA="${PGDATA:-/data/postgres/data}"
 PG_MAJOR="${PG_MAJOR:-17}"
