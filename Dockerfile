@@ -213,6 +213,12 @@ RUN set -eux && \
     mkdir -p /docker-entrypoint-initdb.d && \
     mkdir -m u=rwx,g=rwx,o= -p $PGHOME/data $PGHOME/logs $PGHOME/run $PGHOME/archive /var/run/postgresql /var/log/postgresql && \
     chown -R postgres:postgres $PGHOME /var/run/postgresql /var/log/postgresql /docker-entrypoint-initdb.d && \
+    # 修正 pgBackRest 配置文件权限（兼容 Percona Operator）
+    # Percona 包默认创建的 /etc/pgbackrest.conf 权限为 640 (UID 100, GID 103)，
+    # postgres 用户 (999:999) 无权读取导致 stanza-create 失败。
+    # Operator 实际用 /etc/pgbackrest/conf.d/ 动态配置，此处开放权限让 postgres 可读
+    if [ -f /etc/pgbackrest.conf ]; then chmod 644 /etc/pgbackrest.conf; fi && \
+    if [ -d /etc/pgbackrest ]; then chown -R postgres:postgres /etc/pgbackrest; fi && \
     chmod -R 755 $PGHOME /var/run/postgresql /var/log/postgresql && \
     # 移除默认集群配置（避免自动创建）
     sed -ri 's/#(create_main_cluster) .*$/\1 = false/' /etc/postgresql-common/createcluster.conf && \
