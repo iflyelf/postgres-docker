@@ -222,14 +222,17 @@ RUN set -eux && \
     mkdir -p /docker-entrypoint-initdb.d && \
     mkdir -m u=rwx,g=rwx,o= -p $PGHOME/data $PGHOME/logs $PGHOME/run $PGHOME/archive /var/run/postgresql /var/log/postgresql && \
     chown -R postgres:postgres $PGHOME /var/run/postgresql /var/log/postgresql /docker-entrypoint-initdb.d && \
-    # 修正 pgBackRest 配置文件权限（兼容 Percona Operator）
-    # Percona 包默认创建的 /etc/pgbackrest.conf 权限为 640 (UID 100, GID 103)，
-    # postgres 用户 (999:999) 无权读取导致 stanza-create 失败。
-    # Operator 实际用 /etc/pgbackrest/conf.d/ 动态配置，此处开放权限让 postgres 可读
-    if [ -f /etc/pgbackrest.conf ]; then chmod 644 /etc/pgbackrest.conf; fi && \
-    # 清空默认配置文件内容，避免与 Operator 动态配置冲突（repo1-path 重复定义导致错误）
-    # Operator 会通过 /etc/pgbackrest/conf.d/ 完全管理配置
-    if [ -f /etc/pgbackrest.conf ]; then echo "# Managed by Percona Operator via /etc/pgbackrest/conf.d/" > /etc/pgbackrest.conf; fi && \
+    # 修正 pgBackRest 配置文件权限 + 写入 lock-path 覆盖（兼容 Percona Operator）
+    # 问题1：Percona 包默认创建的 /etc/pgbackrest.conf 权限为 640 (UID 100, GID 103)，
+    #        postgres 用户 (999:999) 无权读取导致 stanza-create 失败。
+    # 问题2：/etc/pgbackrest.conf 默认含 repo1-path，与 Operator 动态注入的 conf.d 冲突。
+    # 问题3：Operator 在 /tmp/pgbackrest 建 lock 目录权限 750，pgbackrest sidecar (UID 26)
+    #        无写权限导致备份失败。Operator 不支持 lock-path 全局参数注入。
+    # 修复：清空默认配置（避免 repo1-path 冲突），写入 lock-path 覆盖使用 /pgdata/pgbackrest-lock
+    #       /pgdata 是 postgres-data 卷，database(999) 和 pgbackrest sidecar(26) 都挂载且可写。
+    # pgBackRest 读取顺序：先读 /etc/pgbackrest.conf，再合并 conf.d/*.conf，不同参数均生效。
+    printf '[global]\nlock-path = /pgdata/pgbackrest-lock\n' > /etc/pgbackrest.conf && \
+    chmod 644 /etc/pgbackrest.conf && \
     if [ -d /etc/pgbackrest ]; then chown -R postgres:postgres /etc/pgbackrest; fi && \
     chmod -R 755 $PGHOME /var/run/postgresql /var/log/postgresql && \
     # 移除默认集群配置（避免自动创建）
