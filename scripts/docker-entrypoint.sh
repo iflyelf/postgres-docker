@@ -18,6 +18,18 @@ set -euo pipefail
 export LANG=zh_CN.UTF-8
 export LC_ALL=zh_CN.UTF-8
 
+# ==============================================================================
+# 预创建 pgBackRest lock 目录（兼容 Percona Operator 的 pgbackrest sidecar）
+# /tmp 在 Pod 里是多容器共享的 EmptyDir，database 容器（postgres 999）先创建
+# /tmp/pgbackrest 时权限为 750，导致 pgbackrest sidecar（UID 26，GID 26/tape）
+# 只有组读权限，无法创建 lock 文件导致备份失败。此处提前创建并赋予 770 权限。
+# ==============================================================================
+if [ ! -d "/tmp/pgbackrest" ]; then
+    mkdir -p /tmp/pgbackrest
+fi
+chmod 770 /tmp/pgbackrest
+chown postgres:tape /tmp/pgbackrest 2>/dev/null || true
+
 PGHOME="${PGHOME:-/data/postgres}"
 PGDATA="${PGDATA:-/data/postgres/data}"
 PG_MAJOR="${PG_MAJOR:-17}"
