@@ -218,6 +218,9 @@ RUN set -eux && \
     # postgres 用户 (999:999) 无权读取导致 stanza-create 失败。
     # Operator 实际用 /etc/pgbackrest/conf.d/ 动态配置，此处开放权限让 postgres 可读
     if [ -f /etc/pgbackrest.conf ]; then chmod 644 /etc/pgbackrest.conf; fi && \
+    # 清空默认配置文件内容，避免与 Operator 动态配置冲突（repo1-path 重复定义导致错误）
+    # Operator 会通过 /etc/pgbackrest/conf.d/ 完全管理配置
+    if [ -f /etc/pgbackrest.conf ]; then echo "# Managed by Percona Operator via /etc/pgbackrest/conf.d/" > /etc/pgbackrest.conf; fi && \
     if [ -d /etc/pgbackrest ]; then chown -R postgres:postgres /etc/pgbackrest; fi && \
     chmod -R 755 $PGHOME /var/run/postgresql /var/log/postgresql && \
     # 移除默认集群配置（避免自动创建）
