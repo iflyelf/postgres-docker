@@ -209,6 +209,15 @@ RUN set -eux && \
     if getent group 999 > /dev/null 2>&1; then groupdel $(getent group 999 | cut -d: -f1) 2>/dev/null || true; fi && \
     groupadd -r postgres --gid=999 && \
     useradd -r -g postgres --uid=999 --home-dir=${PGHOME} --shell=/bin/zsh postgres && \
+    # 兼容 Percona Operator 的 pgBackRest sidecar（以 UID 26 运行）
+    # 该 sidecar 用同一镜像但直接运行 `pgbackrest server`（不走本镜像 entrypoint），
+    # pgBackRest 连接 PG 时需解析自身 UID 的用户名，UID 26 无对应用户则报
+    # "could not look up local user ID 26" 导致备份失败。
+    # UID 26 是 Percona/Crunchy Operator 硬编码值（源自 RHEL postgres 系统 UID），
+    # 此处预创建；同时开放 /etc/passwd 可写，兼容未来 Operator 可能变更的 UID。
+    if ! getent group 26 > /dev/null 2>&1; then groupadd -g 26 pgbackrest; fi && \
+    if ! getent passwd 26 > /dev/null 2>&1; then useradd -u 26 -g 26 --home-dir=${PGHOME} --shell=/bin/bash pgbackrest; fi && \
+    chmod g+w /etc/passwd /etc/group && \
     # 创建目录结构
     mkdir -p /docker-entrypoint-initdb.d && \
     mkdir -m u=rwx,g=rwx,o= -p $PGHOME/data $PGHOME/logs $PGHOME/run $PGHOME/archive /var/run/postgresql /var/log/postgresql && \
