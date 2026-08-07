@@ -211,27 +211,22 @@ RUN set -eux && \
     useradd -r -g postgres --uid=999 --home-dir=${PGHOME} --shell=/bin/zsh postgres && \
     # 兼容 Percona Operator 的 pgBackRest sidecar（以 UID 26 运行）
     # 该 sidecar 用同一镜像但直接运行 `pgbackrest server`（不走本镜像 entrypoint），
-    # pgBackRest 连接 PG 时需解析自身 UID 的用户名，UID 26 无对应用户则报
-    # "could not look up local user ID 26" 导致备份失败。
-    # UID 26 是 Percona/Crunchy Operator 硬编码值（源自 RHEL postgres 系统 UID），
-    # 此处预创建；同时开放 /etc/passwd 可写，兼容未来 Operator 可能变更的 UID。
-    if ! getent group 26 > /dev/null 2>&1; then groupadd -g 26 pgbackrest; fi && \
+    # pgBackRest 通过 Unix socket + peer 认证连接 PostgreSQL。peer 认证要求
+    # OS 用户名必须匹配数据库角色名。此处创建 UID 26 的 "pgbackrest" 用户，
+    # 对应需在 PostgreSQL 里创建 "pgbackrest" 角色（通过 initdb 后的 SQL 或
+    # Operator 机制），并在 pg_hba 加 "local all pgbackrest peer"。
+    if ! getent group 26 > /dev/null 2>&1; then groupadd -g 26 tape; fi && \
     if ! getent passwd 26 > /dev/null 2>&1; then useradd -u 26 -g 26 --home-dir=${PGHOME} --shell=/bin/bash pgbackrest; fi && \
     chmod g+w /etc/passwd /etc/group && \
     # 创建目录结构
     mkdir -p /docker-entrypoint-initdb.d && \
     mkdir -m u=rwx,g=rwx,o= -p $PGHOME/data $PGHOME/logs $PGHOME/run $PGHOME/archive /var/run/postgresql /var/log/postgresql && \
     chown -R postgres:postgres $PGHOME /var/run/postgresql /var/log/postgresql /docker-entrypoint-initdb.d && \
-    # 修正 pgBackRest 配置文件权限 + 写入 lock-path 覆盖（兼容 Percona Operator）
-    # 问题1：Percona 包默认创建的 /etc/pgbackrest.conf 权限为 640 (UID 100, GID 103)，
-    #        postgres 用户 (999:999) 无权读取导致 stanza-create 失败。
-    # 问题2：/etc/pgbackrest.conf 默认含 repo1-path，与 Operator 动态注入的 conf.d 冲突。
-    # 问题3：Operator 在 /tmp/pgbackrest 建 lock 目录权限 750，pgbackrest sidecar (UID 26)
-    #        无写权限导致备份失败。Operator 不支持 lock-path 全局参数注入。
-    # 修复：清空默认配置（避免 repo1-path 冲突），写入 lock-path 覆盖使用 /pgdata/pgbackrest-lock
-    #       /pgdata 是 postgres-data 卷，database(999) 和 pgbackrest sidecar(26) 都挂载且可写。
-    # pgBackRest 读取顺序：先读 /etc/pgbackrest.conf，再合并 conf.d/*.conf，不同参数均生效。
-    printf '[global]\nlock-path = /pgdata/pgbackrest-lock\n' > /etc/pgbackrest.conf && \
+    # 清空 Percona 包默认的 /etc/pgbackrest.conf（兼容 Percona Operator）
+    # 原因1：包默认权限 640 (UID 100, GID 103)，postgres 用户无权读取导致 stanza-create 失败。
+    # 原因2：包默认含 repo1-path，与 Operator 动态注入的 conf.d 配置冲突（repo1-path 重复定义）。
+    # Operator 通过 /etc/pgbackrest/conf.d/ 完全管理配置，此处仅置空并开放读权限。
+    printf '# Managed by Percona Operator via /etc/pgbackrest/conf.d/\n' > /etc/pgbackrest.conf && \
     chmod 644 /etc/pgbackrest.conf && \
     if [ -d /etc/pgbackrest ]; then chown -R postgres:postgres /etc/pgbackrest; fi && \
     chmod -R 755 $PGHOME /var/run/postgresql /var/log/postgresql && \
