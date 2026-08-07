@@ -202,21 +202,20 @@ RUN set -eux && \
 
 # ***** 配置 postgres 用户与目录 *****
 RUN set -eux && \
-    # Percona/PostgreSQL 包安装时可能已创建 postgres 用户/组（UID/GID 不定），
-    # 先清理再以固定 UID/GID=999 重建（兼容 Percona Operator 和标准 PG 镜像）
+    # 关键：对齐 Percona Operator 官方镜像，postgres 用户固定为 UID/GID=26。
+    # Percona Operator 的所有工作负载（database 主进程 + pgBackRest sidecar）
+    # 均以 UID 26 运行。若 postgres 用 UID 999，则 sidecar(26) 无法读取数据文件
+    # (600/700 权限)，备份必然失败。UID 26 是 Crunchy/Percona 硬编码值
+    # (源自 RHEL 的 postgres 系统 UID)，让数据文件属主 = sidecar UID，备份直接可读。
+    # 同时 peer 认证时 OS 用户名 postgres 匹配数据库 postgres 角色，无需额外角色。
+    # 先清理包安装可能创建的 postgres 用户/组，以及 Ubuntu 默认占用 GID 26 的 tape 组。
     if id postgres > /dev/null 2>&1; then userdel -r postgres 2>/dev/null || userdel postgres; fi && \
     if getent group postgres > /dev/null 2>&1; then groupdel postgres 2>/dev/null || true; fi && \
-    if getent group 999 > /dev/null 2>&1; then groupdel $(getent group 999 | cut -d: -f1) 2>/dev/null || true; fi && \
-    groupadd -r postgres --gid=999 && \
-    useradd -r -g postgres --uid=999 --home-dir=${PGHOME} --shell=/bin/zsh postgres && \
-    # 兼容 Percona Operator 的 pgBackRest sidecar（以 UID 26 运行）
-    # 该 sidecar 用同一镜像但直接运行 `pgbackrest server`（不走本镜像 entrypoint），
-    # pgBackRest 通过 Unix socket + peer 认证连接 PostgreSQL。peer 认证要求
-    # OS 用户名必须匹配数据库角色名。此处创建 UID 26 的 "pgbackrest" 用户，
-    # 对应需在 PostgreSQL 里创建 "pgbackrest" 角色（通过 initdb 后的 SQL 或
-    # Operator 机制），并在 pg_hba 加 "local all pgbackrest peer"。
-    if ! getent group 26 > /dev/null 2>&1; then groupadd -g 26 tape; fi && \
-    if ! getent passwd 26 > /dev/null 2>&1; then useradd -u 26 -g 26 --home-dir=${PGHOME} --shell=/bin/bash pgbackrest; fi && \
+    if getent passwd 26 > /dev/null 2>&1; then userdel -r $(getent passwd 26 | cut -d: -f1) 2>/dev/null || true; fi && \
+    if getent group 26 > /dev/null 2>&1; then groupdel $(getent group 26 | cut -d: -f1) 2>/dev/null || true; fi && \
+    groupadd -r postgres --gid=26 && \
+    useradd -r -g postgres --uid=26 --home-dir=${PGHOME} --shell=/bin/bash postgres && \
+    # 开放 /etc/passwd 可写，兼容 Operator 通过 nss_wrapper 动态注入用户名的场景
     chmod g+w /etc/passwd /etc/group && \
     # 创建目录结构
     mkdir -p /docker-entrypoint-initdb.d && \
@@ -260,7 +259,7 @@ ENTRYPOINT ["/docker-entrypoint.sh"]
 EXPOSE 5432 8008
 
 # ***** 用户 *****
-USER 999
+USER 26
 
 # ***** 执行命令 *****
 CMD ["postgres"]
