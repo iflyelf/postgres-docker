@@ -44,7 +44,8 @@ export PG_MAJOR
 : "${PATRONI_NAME:?请设置 PATRONI_NAME（如 pg1）}"
 : "${PATRONI_CONNECT_HOST:?请设置 PATRONI_CONNECT_HOST（如 pg1）}"
 : "${ETCD_HOSTS:?请设置 ETCD_HOSTS（如 pg1:2379,pg2:2379,pg3:2379）}"
-: "${POSTGRES_PASSWORD:?请设置 POSTGRES_PASSWORD}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-ysyh!9Sky}"
+export POSTGRES_PASSWORD
 
 # 嵌入式 etcd 模式才需要这些引导参数（独立 etcd 容器时由 etcd-entrypoint.sh 使用）
 if [ "${ETCD_EMBEDDED}" = "true" ]; then

@@ -98,7 +98,7 @@ docker pull swr.cn-east-3.myhuaweicloud.com/iflyelf/postgres:latest
 
 ```bash
 docker run -d --name postgres \
-  -e POSTGRES_PASSWORD=change_me \
+  -e POSTGRES_PASSWORD=ysyh!9Sky \
   -p 5432:5432 \
   -v pgdata:/data/postgres \
   iflyelf/postgres:latest
@@ -107,7 +107,7 @@ docker run -d --name postgres \
 ## 单机部署（docker compose）
 
 ```bash
-cp .env.example .env          # 修改 POSTGRES_PASSWORD 等
+cp .env.example .env          # 超级用户默认密码 ysyh!9Sky，生产请修改
 docker compose up -d
 docker compose logs -f postgres
 ```
@@ -142,7 +142,7 @@ etcd1 (172.22.1.21)  etcd2 (172.22.1.22)  etcd3 (172.22.1.23)   ← DCS，quorum
 ```
 
 ```bash
-cp .env.example .env          # 必须修改 POSTGRES_PASSWORD / REPLICATION_PASSWORD / REWIND_PASSWORD
+cp .env.example .env          # 超级用户默认密码 ysyh!9Sky；生产请修改该密码及复制/rewind 密码
 docker compose -f docker-compose.cluster.yml up -d
 
 # 查看集群状态（任意节点执行）

@@ -136,9 +136,11 @@ if [ ! -s "${PGDATA}/PG_VERSION" ]; then
     chmod 0700 "${PGDATA}"
     "${PGBIN}/initdb" \
         --username="${POSTGRES_USER:-postgres}" \
-        --pwfile=<(echo "${POSTGRES_PASSWORD:-postgres}") \
+        --pwfile=<(echo "${POSTGRES_PASSWORD:-ysyh!9Sky}") \
         --encoding=UTF8 \
         --locale=zh_CN.UTF-8 \
+        --auth-local=trust \
+        --auth-host=scram-sha-256 \
         -D "${PGDATA}"
 
     # 允许容器网络连接

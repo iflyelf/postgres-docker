@@ -37,8 +37,8 @@ x-pg-common: &pg-common
   environment: &pg-env
     # ---------- PostgreSQL 初始化 ----------
     POSTGRES_USER: ${POSTGRES_USER:-postgres}
-    # 超级用户密码（必填，放在同目录 .env 中）
-    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
+    # 超级用户密码（默认 ysyh!9Sky，生产环境请务必在 .env 中修改）
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ysyh!9Sky}
     REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:-repl-pass}
     REWIND_PASSWORD: ${REWIND_PASSWORD:-rewind-pass}
     # ---------- Patroni / DCS ----------
