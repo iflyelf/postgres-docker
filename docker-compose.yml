@@ -69,9 +69,9 @@ services:
     shm_size: 1gb
     # 配置容器连接的网络
     networks:
-      postgres:
-        ipv4_address: 172.22.0.2
-        ipv6_address: fd99::2
+      pg_net:
+        ipv4_address: 172.21.0.2
+        ipv6_address: fe99::2
     # 暴露端口信息
     ports:
     - "5432:5432"
@@ -91,11 +91,12 @@ services:
 
 
 networks:
-  postgres:
+  # 网络名以组件名开头(pg_)，便于同主机多组件共处时快速识别
+  pg_net:
     driver: bridge
     enable_ipv6: true
     driver_opts:
-      com.docker.network.bridge.name: postgres
+      com.docker.network.bridge.name: pg_net
       com.docker.network.bridge.enable_icc: "true"
       com.docker.network.bridge.enable_ip_forwarding: "true"
       com.docker.network.bridge.enable_ip_masquerade: "true"
@@ -105,7 +106,7 @@ networks:
     ipam:
       driver: default
       config:
-      - subnet: 172.22.0.0/24
-        gateway: 172.22.0.1
-      - subnet: fd99::/64
-        gateway: fd99::1
+      - subnet: 172.21.0.0/24
+        gateway: 172.21.0.1
+      - subnet: fe99::/64
+        gateway: fe99::1

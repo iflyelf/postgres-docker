@@ -73,9 +73,9 @@ services:
       PATRONI_NAME: pg1
       PATRONI_CONNECT_HOST: pg1
       ETCD_NAME: pg1
-      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://172.23.0.11:2380
-      ETCD_ADVERTISE_CLIENT_URLS: http://172.23.0.11:2379
-      ETCD_INITIAL_CLUSTER: pg1=http://172.23.0.11:2380,pg2=http://172.23.0.12:2380,pg3=http://172.23.0.13:2380
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://172.21.0.11:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://172.21.0.11:2379
+      ETCD_INITIAL_CLUSTER: pg1=http://172.21.0.11:2380,pg2=http://172.21.0.12:2380,pg3=http://172.21.0.13:2380
     volumes:
       # 数据目录（含 etcd 数据 + PostgreSQL 数据/归档/日志）
       - ./data/pg1:/data:rw,cached
@@ -83,9 +83,9 @@ services:
       - /usr/share/zoneinfo:/usr/share/zoneinfo:ro,cached
       - /etc/localtime:/etc/localtime:ro,cached
     networks:
-      postgres-cluster:
-        ipv4_address: 172.23.0.11
-        ipv6_address: fd9a::11
+      pg_cluster_net:
+        ipv4_address: 172.21.0.11
+        ipv6_address: fe99::11
     ports:
     - "5432:5432"    # PostgreSQL
     - "8008:8008"    # Patroni REST API
@@ -106,17 +106,17 @@ services:
       PATRONI_NAME: pg2
       PATRONI_CONNECT_HOST: pg2
       ETCD_NAME: pg2
-      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://172.23.0.12:2380
-      ETCD_ADVERTISE_CLIENT_URLS: http://172.23.0.12:2379
-      ETCD_INITIAL_CLUSTER: pg1=http://172.23.0.11:2380,pg2=http://172.23.0.12:2380,pg3=http://172.23.0.13:2380
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://172.21.0.12:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://172.21.0.12:2379
+      ETCD_INITIAL_CLUSTER: pg1=http://172.21.0.11:2380,pg2=http://172.21.0.12:2380,pg3=http://172.21.0.13:2380
     volumes:
       - ./data/pg2:/data:rw,cached
       - /usr/share/zoneinfo:/usr/share/zoneinfo:ro,cached
       - /etc/localtime:/etc/localtime:ro,cached
     networks:
-      postgres-cluster:
-        ipv4_address: 172.23.0.12
-        ipv6_address: fd9a::12
+      pg_cluster_net:
+        ipv4_address: 172.21.0.12
+        ipv6_address: fe99::12
     ports:
     - "5433:5432"
     - "8009:8008"
@@ -137,17 +137,17 @@ services:
       PATRONI_NAME: pg3
       PATRONI_CONNECT_HOST: pg3
       ETCD_NAME: pg3
-      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://172.23.0.13:2380
-      ETCD_ADVERTISE_CLIENT_URLS: http://172.23.0.13:2379
-      ETCD_INITIAL_CLUSTER: pg1=http://172.23.0.11:2380,pg2=http://172.23.0.12:2380,pg3=http://172.23.0.13:2380
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://172.21.0.13:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://172.21.0.13:2379
+      ETCD_INITIAL_CLUSTER: pg1=http://172.21.0.11:2380,pg2=http://172.21.0.12:2380,pg3=http://172.21.0.13:2380
     volumes:
       - ./data/pg3:/data:rw,cached
       - /usr/share/zoneinfo:/usr/share/zoneinfo:ro,cached
       - /etc/localtime:/etc/localtime:ro,cached
     networks:
-      postgres-cluster:
-        ipv4_address: 172.23.0.13
-        ipv6_address: fd9a::13
+      pg_cluster_net:
+        ipv4_address: 172.21.0.13
+        ipv6_address: fe99::13
     ports:
     - "5434:5432"
     - "8010:8008"
@@ -160,11 +160,12 @@ services:
 
 
 networks:
-  postgres-cluster:
+  # 网络名以组件名开头(pg_)，便于同主机多组件共处时快速识别
+  pg_cluster_net:
     driver: bridge
     enable_ipv6: true
     driver_opts:
-      com.docker.network.bridge.name: pg-cluster
+      com.docker.network.bridge.name: pg_cluster_net
       com.docker.network.bridge.enable_icc: "true"
       com.docker.network.bridge.enable_ip_forwarding: "true"
       com.docker.network.bridge.enable_ip_masquerade: "true"
@@ -174,7 +175,7 @@ networks:
     ipam:
       driver: default
       config:
-      - subnet: 172.23.0.0/24
-        gateway: 172.23.0.1
-      - subnet: fd9a::/64
-        gateway: fd9a::1
+      - subnet: 172.21.0.0/24
+        gateway: 172.21.0.1
+      - subnet: fe99::/64
+        gateway: fe99::1

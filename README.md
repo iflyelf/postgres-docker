@@ -117,7 +117,7 @@ docker compose logs -f postgres
 | --- | --- |
 | 镜像 | `iflyelf/postgres:latest`（可换成 SWR 地址） |
 | 数据/归档/日志 | `./data/postgres`、`./archive/postgres`、`./logs/postgres` |
-| 网络 | 自定义桥接网络 `postgres`，固定 IP `172.22.0.2`（含 IPv6 `fd99::2`） |
+| 网络 | 自定义桥接网络 `pg_net`（`172.21.0.0/24` + `fe99::/64`），固定 IP `172.21.0.2` / `fe99::2` |
 | 时区 | 挂载宿主机 `/usr/share/zoneinfo`、`/etc/localtime` |
 | 共享内存 | `shm_size: 1gb`（并行查询/大排序需要） |
 | 健康检查 | `pg_isready`，每 30s 一次 |
@@ -144,11 +144,13 @@ docker exec pg1 patronictl -c /tmp/patroni.yml list
 # | pg3    | pg3   | Replica | streaming |  1 |         0 |
 ```
 
-| 节点 | PostgreSQL 端口 | Patroni REST API | 固定 IP | 数据目录 |
-| --- | --- | --- | --- | --- |
-| pg1 | `5432` | `8008` | `172.23.0.11` | `./data/pg1` |
-| pg2 | `5433` | `8009` | `172.23.0.12` | `./data/pg2` |
-| pg3 | `5434` | `8010` | `172.23.0.13` | `./data/pg3` |
+| 节点 | PostgreSQL 端口 | Patroni REST API | IPv4 | IPv6 | 数据目录 |
+| --- | --- | --- | --- | --- | --- |
+| pg1 | `5432` | `8008` | `172.21.0.11` | `fe99::11` | `./data/pg1` |
+| pg2 | `5433` | `8009` | `172.21.0.12` | `fe99::12` | `./data/pg2` |
+| pg3 | `5434` | `8010` | `172.21.0.13` | `fe99::13` | `./data/pg3` |
+
+网络名为 `pg_cluster_net`，网段 `172.21.0.0/24`（网关 `172.21.0.1`）+ `fe99::/64`（网关 `fe99::1`）。
 
 集群要点：
 
@@ -163,6 +165,21 @@ docker exec pg1 patronictl -c /tmp/patroni.yml list
 - **扩缩容**：将新节点加入两处 `ETCD_INITIAL_CLUSTER` 与 `ETCD_HOSTS`，并用相同 `PATRONI_SCOPE` 启动即可
 
 > 集群密码写入 `patroni.yml.tmpl` 的占位符，由 `.env` 注入，不要提交 `.env`（已在 `.gitignore` 中忽略）。
+
+### 网络规划
+
+统一网段与命名规则（便于同主机部署多个组件时识别与排障）：
+
+| 项目 | 规则 |
+| --- | --- |
+| IPv4 网段 | `172.21.0.0/24`，网关 `172.21.0.1` |
+| IPv6 网段 | `fe99::/64`，网关 `fe99::1` |
+| 网络/桥接名 | 以组件名开头：`pg_net`（单机）、`pg_cluster_net`（集群） |
+| 后续组件 | 同理，如 `mysql_net`、`redis_net`、`nginx_net`，不使用 `app_net` |
+| 容器 IP | 单机 `172.21.0.2` / `fe99::2`；集群 `172.21.0.11~13` / `fe99::11~13` |
+
+> 桥接名受 Linux 接口名 15 字符限制（超长会报 `numerical result out of range`），命名时需留意。
+> 单机与集群 compose 共用同一网段，同一主机上请只运行其中一套；如需并存，请为集群改用其他网段。
 
 ## CPU / 内存自动调优
 
