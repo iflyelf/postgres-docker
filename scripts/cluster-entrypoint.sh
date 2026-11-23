@@ -76,7 +76,14 @@ prepare_dirs() {
 # 2. 启动 etcd（集群 DCS）
 # ==============================================================================
 start_etcd() {
-    log "启动 etcd: name=${ETCD_NAME} state=${ETCD_INITIAL_CLUSTER_STATE}"
+    # 首次启动用 new（引导集群），数据目录已初始化后必须用 existing，
+    # 否则 etcd 3.5 会报 "member xxx has already been bootstrapped" 并退出（容器反复重启）
+    local member_dir="${ETCD_DATA_DIR}/member"
+    local state="${ETCD_INITIAL_CLUSTER_STATE:-new}"
+    if [ -d "${member_dir}" ] && [ "${state}" = "new" ]; then
+        state="existing"
+    fi
+    log "启动 etcd: name=${ETCD_NAME} state=${state}（数据目录$( [ -d "${member_dir}" ] && echo 已存在 || echo 为空)）"
     # etcd 3.5 会拒绝"环境变量与命令行参数同时设置"的项（ETCD_* 与 --flag 冲突），
     # 这里先清掉所有 ETCD_* 环境变量，统一由下面的命令行参数控制
     local clean_env=() v
@@ -92,7 +99,7 @@ start_etcd() {
         --initial-advertise-peer-urls "${ETCD_INITIAL_ADVERTISE_PEER_URLS}" \
         --initial-cluster "${ETCD_INITIAL_CLUSTER}" \
         --initial-cluster-token "${ETCD_INITIAL_CLUSTER_TOKEN}" \
-        --initial-cluster-state "${ETCD_INITIAL_CLUSTER_STATE}" \
+        --initial-cluster-state "${state}" \
         --quota-backend-bytes "${ETCD_QUOTA_BACKEND_BYTES}" \
         --auto-compaction-mode periodic \
         --auto-compaction-retention 1h &
