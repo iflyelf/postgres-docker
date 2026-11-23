@@ -70,8 +70,8 @@ services:
     # 配置容器连接的网络
     networks:
       pg_net:
-        ipv4_address: 172.21.0.2
-        ipv6_address: fe99::2
+        ipv4_address: 172.22.0.2
+        ipv6_address: fe9a::2
     # 暴露端口信息
     ports:
     - "5432:5432"
@@ -106,7 +106,7 @@ networks:
     ipam:
       driver: default
       config:
-      - subnet: 172.21.0.0/24
-        gateway: 172.21.0.1
-      - subnet: fe99::/64
-        gateway: fe99::1
+      - subnet: 172.22.0.0/24
+        gateway: 172.22.0.1
+      - subnet: fe9a::/64
+        gateway: fe9a::1
