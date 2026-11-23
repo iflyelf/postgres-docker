@@ -220,6 +220,31 @@ docker build --network host \
 3. **merge**：用 `docker manifest` 合并为多架构清单 `latest` 与 `<PG_MAJOR>`
    （Docker v2 manifest list，兼容华为云 SWR），并调用 SWR API 将仓库设为公开
 
+### 多架构构建（不使用 QEMU）
+
+已**取消 QEMU 模拟**，改为两个原生 runner 并行构建，再用 `docker manifest` 合并：
+
+| 架构 | Runner | 说明 |
+| --- | --- | --- |
+| amd64 | `ubuntu-latest`（x64 原生） | 直接编译，无需模拟 |
+| arm64 | `ubuntu-24.04-arm`（arm64 原生） | 与 x64 速度相当；public 仓库免费 |
+
+合并前每个架构各自推送单架构标签（`latest-amd64`、`latest-arm64`、`17-amd64`、`17-arm64`），
+`merge` 作业再用 `docker manifest create/push` 生成多架构清单 `latest`、`17`：
+
+```bash
+docker manifest create <repo>:latest --amend <repo>:latest-amd64 <repo>:latest-arm64
+docker manifest push --purge <repo>:latest
+```
+
+选择 `docker manifest` 而非 `buildx imagetools` 的原因：前者产出 Docker v2 manifest list，
+华为云 SWR 可正常识别；`imagetools` 会生成 OCI index，SWR 部分场景不兼容。
+
+> 若仓库为私有（arm runner 需付费），可把 arm64 作业改回
+> `runs-on: ubuntu-latest` + `docker/setup-qemu-action`，或在 `matrix` 中只保留 amd64。
+
+实测耗时（本次构建 #87）：amd64 约 5.6 分钟、arm64 约 6 分钟（两者并行），合并清单约 2 分钟。
+
 推送目标：
 
 | 仓库 | 镜像 |
