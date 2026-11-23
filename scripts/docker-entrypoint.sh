@@ -26,14 +26,30 @@ AUTO_CONF_DIR="${PGHOME}/conf.d"
 TUNER="/usr/local/bin/postgresql-config-tuner.sh"
 
 # ==============================================================================
-# 生成动态调优配置文件（供 include 使用）
+# 生成动态调优配置文件（供 include_dir 引入）
+# 参数按容器 CPU / 内存自动计算（连接数、缓冲区、WAL、并行、autovacuum、IO 等），
+# 生成内容带中文注释说明每项的计算公式；每次启动重新生成，跟随资源变化
 # ==============================================================================
 generate_tuned_config() {
     mkdir -p "${AUTO_CONF_DIR}"
-    echo ">>> [entrypoint] 根据容器资源自动计算 PostgreSQL 内存参数..."
+    echo ">>> [entrypoint] 根据容器 CPU / 内存自动计算 PostgreSQL 参数..."
     "${TUNER}" conf > "${AUTO_CONF_DIR}/00-auto-tuned.conf"
-    echo ">>> [entrypoint] 已生成 ${AUTO_CONF_DIR}/00-auto-tuned.conf:"
-    cat "${AUTO_CONF_DIR}/00-auto-tuned.conf"
+    echo ">>> [entrypoint] 已生成 ${AUTO_CONF_DIR}/00-auto-tuned.conf"
+    # 摘要打印到容器日志，方便确认本次生效的资源与关键参数
+    "${TUNER}" summary
+}
+
+# ==============================================================================
+# 确保主配置包含自动调优目录（兼容旧数据目录：老版本镜像未写入 include_dir）
+# ==============================================================================
+ensure_include_dir() {
+    local conf="${PGDATA}/postgresql.conf"
+    [ -f "$conf" ] || return 0
+    if grep -qE "^[[:space:]]*include_dir[[:space:]]*=" "$conf"; then
+        return 0
+    fi
+    echo ">>> [entrypoint] 主配置缺少 include_dir，自动追加 ${AUTO_CONF_DIR}"
+    printf "\ninclude_dir = '%s'\n" "$AUTO_CONF_DIR" >> "$conf"
 }
 
 # ==============================================================================
@@ -72,16 +88,14 @@ if [ ! -s "${PGDATA}/PG_VERSION" ]; then
         --locale=zh_CN.UTF-8 \
         -D "${PGDATA}"
 
-    # 在主配置中引入自动调优目录
-    echo "include_dir = '${AUTO_CONF_DIR}'" >> "${PGDATA}/postgresql.conf"
-
     # 允许容器网络连接
     echo "host all all 0.0.0.0/0 scram-sha-256" >> "${PGDATA}/pg_hba.conf"
     echo "listen_addresses = '*'" >> "${PGDATA}/postgresql.conf"
-
-    # 预加载扩展库
-    echo "shared_preload_libraries = 'timescaledb,pg_stat_monitor'" >> "${PGDATA}/postgresql.conf"
+    # shared_preload_libraries / 内存参数全部由自动调优配置提供，此处不再重复写入
 fi
+
+# 确保主配置引入自动调优目录（旧数据目录自动补齐）
+ensure_include_dir
 
 # 每次启动都重新计算调优配置（内存/CPU 可能变化）
 generate_tuned_config

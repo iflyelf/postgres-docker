@@ -12,7 +12,8 @@
 - **TimescaleDB**：通过 packagecloud apt 源安装（`timescaledb-2-postgresql`，含 `timescaledb-tune`）
 - **扩展**：pgvector、pgaudit、pg_stat_monitor、pg_repack、wal2json、pgbackrest、pgbouncer、pgbadger
 - **HA**：内置 Patroni（独立 venv `/opt/patroni`，版本固定并自动跟进），兼容 Percona Operator
-- **内存自动计算**：容器启动时按 CPU/内存 limit 动态计算 PostgreSQL 参数
+- **自动调优**：容器启动时按 CPU / 内存 limit 自动计算连接数、缓冲区、WAL、并行、autovacuum、IO 等参数，
+  生成带中文注释的 `conf.d/00-auto-tuned.conf` 并自动 include，日志打印资源与关键参数摘要
 - **本地化**：中文 locale（zh_CN.UTF-8，另生成 en_US.UTF-8 兼容 Operator）+ Asia/Shanghai 时区
 
 > **版本说明**：`PG_MAJOR=17`，与现有数据目录保持一致。Percona 与 TimescaleDB 源已提供 PG 18，
@@ -94,46 +95,94 @@ docker run -d --name postgres \
   iflyelf/postgres:latest
 ```
 
-## 内存自动计算
+## CPU / 内存自动调优
 
-`postgresql-config-tuner.sh` 探测容器 cgroup 限制（v2 优先，回退 v1 / 宿主机），
-按以下公式计算参数（对齐生产 `postgresql.base.conf` 的注释公式）：
+容器启动时 `postgresql-config-tuner.sh` 探测容器 CPU / 内存限制
+（cgroup v2 优先，回退 v1，最后用宿主机值），自动计算连接数、内存、WAL、并行、
+autovacuum、IO、复制等参数，**生成带中文注释的配置**并写入 `$PGHOME/conf.d/00-auto-tuned.conf`，
+由 `include_dir` 引入；容器日志会打印资源与关键参数摘要。
 
-| 参数                            | 计算公式                                      |
-|---------------------------------|-----------------------------------------------|
-| shared_buffers                  | 内存 × 25%                                     |
-| effective_cache_size            | 内存 × 75%                                     |
-| maintenance_work_mem            | 内存 × 5%（上限 2048MB）                        |
-| work_mem                        | (内存 × 25%) / (max_connections × 4)，≥ 4MB    |
-| wal_buffers                     | shared_buffers / 32（上限 16MB）               |
-| max_worker_processes            | max(CPU, 并行 worker + TS worker + 4)          |
-| max_parallel_workers            | CPU 核数                                       |
-| max_parallel_workers_per_gather | CPU / 2（≥ 2）                                 |
-| timescaledb.max_background_workers | CPU + 1（上限 16）                          |
+- 每次启动重新生成（资源 limit 变化后重启即生效）
+- 旧数据目录若缺少 `include_dir`，entrypoint 会自动补齐后生效
+- 生成内容每项都带中文注释与计算公式，例如：
+
+```conf
+# 共享缓冲区 = 内存 × 25% = 8192MB × 25% = 2048MB（限制 128MB~64GB）
+#   数据库最热数据缓存，建议为物理内存的 25%
+shared_buffers = '2048MB'
+
+# 单次排序/哈希内存 = (内存 × 25%) ÷ (max_connections × 4) = 4MB（限制 4MB~256MB）
+#   (8192×25%) ÷ (512×4) = 1MB
+#   并发因子 4 表示同时约有 4 个操作复用该连接的内存预算；复杂查询可按会话临时调大
+work_mem = '4MB'
+```
+
+### 计算公式
+
+| 参数 | 计算公式 | 取值范围 |
+| --- | --- | --- |
+| `max_connections` | min(内存MB ÷ 16, CPU × 150 + 100) | 100~5000 |
+| `superuser_reserved_connections` | max_connections ÷ 100 | 3~20 |
+| `shared_buffers` | 内存 × 25% | 128MB~64GB |
+| `effective_cache_size` | 内存 × 75% | — |
+| `maintenance_work_mem` | 内存 × 5% | 64MB~2GB |
+| `work_mem` | (内存 × 25%) ÷ (max_connections × 4) | 4MB~256MB |
+| `temp_buffers` | shared_buffers ÷ 128 | 8MB~128MB |
+| `wal_buffers` | shared_buffers ÷ 32 | 1MB~16MB |
+| `min_wal_size` | shared_buffers ÷ 4 | 512MB~4GB |
+| `max_wal_size` | shared_buffers × 2 | 2GB~32GB |
+| `wal_keep_size` | max_wal_size ÷ 2 | 512MB~8GB |
+| `max_parallel_workers` | CPU 核数 | ≥2 |
+| `max_parallel_workers_per_gather` | CPU ÷ 2 | ≥2 |
+| `max_parallel_maintenance_workers` | CPU ÷ 2 | ≥2 |
+| `max_worker_processes` | max(8, CPU, 并行 worker + TS worker + 4) | — |
+| `timescaledb.max_background_workers` | CPU + 1 | 2~16 |
+| `autovacuum_max_workers` | CPU 核数 | 3~8 |
+| `autovacuum_vacuum_cost_limit` | CPU × 100 | 200~2000 |
+| `effective_io_concurrency` | CPU × 8（SSD） | 16~200 |
+| `maintenance_io_concurrency` | CPU × 4 | 8~100 |
+| `max_locks_per_transaction` | max_connections ÷ 32 | 64~512 |
+| `max_wal_senders` / `max_replication_slots` | CPU × 2 | 10~64 |
+
+固定策略（不随资源变化）：`checkpoint_timeout=15min`（TimescaleDB 建议）、
+`checkpoint_completion_target=0.9`、`wal_compression=on`、`random_page_cost=1.1`（SSD）、
+`autovacuum_naptime=10s`、`huge_pages=off`（容器内不可用），
+`shared_preload_libraries='timescaledb,pg_stat_monitor'`。
+
+### 环境变量覆盖
+
+| 变量 | 说明 |
+| --- | --- |
+| `PG_MEMORY_LIMIT` | 内存上限，支持 `8Gi` / `8192Mi` / 字节数 |
+| `PG_CPU_LIMIT` | CPU 上限，支持 `4` / `2.5` / `500m` |
+| `PG_MAX_CONNECTIONS` | 直接指定连接数（例如配合 pgbouncer 连接池时调小） |
 
 ### 独立测试
 
 ```bash
-# 1. 自动探测容器 cgroup 限制（默认）
-./scripts/postgresql-config-tuner.sh --patroni
+# 1. 自动探测容器 cgroup 限制，输出带注释的 postgresql.conf 片段（默认）
+./scripts/postgresql-config-tuner.sh conf
 
 # 2. 手动指定 CPU/内存（支持 K8s 资源格式：8Gi/4/500m 等）
-PG_MEMORY_LIMIT=8Gi PG_CPU_LIMIT=4 ./scripts/postgresql-config-tuner.sh --patroni
+PG_MEMORY_LIMIT=8Gi PG_CPU_LIMIT=4 ./scripts/postgresql-config-tuner.sh conf
 
 # 3. 混合模式：仅指定内存，CPU 自动探测
-PG_MEMORY_LIMIT=16Gi ./scripts/postgresql-config-tuner.sh --patroni
+PG_MEMORY_LIMIT=16Gi ./scripts/postgresql-config-tuner.sh conf
 
-# 4. 模拟指定 max_connections（默认 10000）
-PG_MAX_CONNECTIONS=1000 PG_MEMORY_LIMIT=8Gi PG_CPU_LIMIT=4 ./scripts/postgresql-config-tuner.sh --patroni
+# 4. 直接指定连接数
+PG_MAX_CONNECTIONS=1000 PG_MEMORY_LIMIT=8Gi PG_CPU_LIMIT=4 ./scripts/postgresql-config-tuner.sh conf
 
-# 5. 输出 postgresql.conf 格式（默认）
-PG_MEMORY_LIMIT=8Gi PG_CPU_LIMIT=4 ./scripts/postgresql-config-tuner.sh conf
+# 5. 输出资源探测与关键参数摘要（容器启动日志中同样会打印）
+PG_MEMORY_LIMIT=8Gi PG_CPU_LIMIT=4 ./scripts/postgresql-config-tuner.sh summary
+
+# 6. 输出 Patroni dynamicConfiguration 片段（带中文注释）
+./scripts/postgresql-config-tuner.sh --patroni
 ```
 
 **说明：**
 - `PG_MEMORY_LIMIT` / `PG_CPU_LIMIT` 未指定时，自动从容器 cgroup 探测（优先 v2，回退 v1）
 - 手动指定支持 K8s 格式：内存(8Gi/4096Mi/...)、CPU(4/2.5/500m/...)
-- 此脚本与 `../update-pg-params.py` 计算公式完全一致，相同输入产出完全相同结果
+- 参数整体按 SSD + 容器化 OLTP 场景设定；HDD 或分析型负载建议按注释自行调整
 
 ## 本地构建
 
