@@ -1,0 +1,111 @@
+services:
+
+  # 服务名
+  postgres:
+    # 模拟一个伪终端
+    tty: true
+    # 打开标准输入,可以接受外部输入
+    stdin_open: true
+    # 主机名
+    hostname: postgres
+    # 指定容器名称
+    container_name: postgres
+    # 指定为镜像名称或镜像ID
+    # Docker Hub:   iflyelf/postgres:latest
+    # 华为云 SWR:   swr.cn-east-3.myhuaweicloud.com/iflyelf/postgres:latest
+    image: iflyelf/postgres:latest
+    # 覆盖容器启动后默认执行的命令
+    # command: postgres
+    # 允许容器中运行一些特权命令
+    # PostgreSQL 仅需普通用户权限, 无需特权模式; 如需 modprobe 等场景再开启
+    # privileged: true
+    # 指定容器退出后的重启策略为始终重启
+    restart: always
+    # 指定容器的内核能力(capacity)分配
+    # cap_add:
+    #  - ALL
+    # 配置容器内核参数
+    #sysctls:
+    #  - net.ipv4.tcp_ecn=1
+    #  - net.ipv4.tcp_ecn_fallback=1
+    #  - net.ipv4.tcp_congestion_control=bbrplus
+    # 数据卷所挂载路径设置
+    volumes:
+      # 数据目录(含 pg_hba.conf / postgresql.conf)
+      - ./data/postgres:/data/postgres/data:rw,cached
+      # WAL 归档目录
+      - ./archive/postgres:/data/postgres/archive:rw,cached
+      # 日志目录(csvlog 输出)
+      - ./logs/postgres:/data/postgres/logs:rw,cached
+      # 自定义参数覆盖(可选: 需先创建该文件, 数值会覆盖自动调优结果)
+      # - ./conf/postgres/99-custom.conf:/data/postgres/conf.d/99-custom.conf:ro
+      # 同步宿主机时区与时间
+      - /usr/share/zoneinfo:/usr/share/zoneinfo:ro,cached
+      - /etc/localtime:/etc/localtime:ro,cached
+      # 共享内核(备份/诊断工具可能需要读取内核模块信息)
+      # - /lib/modules:/lib/modules:ro,cached
+    # 环境变量
+    # 说明: 也可放入同目录 .env 文件, compose 会自动读取
+    environment:
+      # ---------- 初始化必填 ----------
+      # 超级用户密码(未设置且非 trust 认证时容器会拒绝启动)
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
+      # 初始化时创建的超级用户(默认 postgres)
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      # 初始化时创建的数据库(默认与 POSTGRES_USER 同名)
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      # 初始化参数: 统一使用中文 UTF-8 locale
+      POSTGRES_INITDB_ARGS: "-E UTF8 --lc-collate=zh_CN.UTF-8 --lc-ctype=zh_CN.UTF-8 --lc-messages=zh_CN.UTF-8 --lc-monetary=zh_CN.UTF-8 --lc-numeric=zh_CN.UTF-8 --lc-time=zh_CN.UTF-8"
+      # ---------- 自动调优(可选) ----------
+      # 手动指定 CPU / 内存上限(支持 8Gi/4096Mi/4/500m), 不设置则自动从 cgroup 探测
+      PG_MEMORY_LIMIT: ${PG_MEMORY_LIMIT:-}
+      PG_CPU_LIMIT: ${PG_CPU_LIMIT:-}
+      # 直接指定连接数(如配合 pgbouncer 连接池时调小; 不设置则按内存/CPU 自动计算)
+      PG_MAX_CONNECTIONS: ${PG_MAX_CONNECTIONS:-}
+      # ---------- 本地化 ----------
+      TZ: ${TZ:-Asia/Shanghai}
+      LANG: ${LANG:-zh_CN.UTF-8}
+    # 共享内存: PostgreSQL 并行查询/大排序需要, 建议 256MB~2GB
+    shm_size: 1gb
+    # 配置容器连接的网络
+    networks:
+      postgres:
+        ipv4_address: 172.22.0.2
+        ipv6_address: fd99::2
+    # 暴露端口信息
+    ports:
+    - "5432:5432"
+    # 健康检查: 调优配置生成完成且数据库可接受连接才算健康
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres} -h 127.0.0.1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    # 指定容器的 ulimits 限制值
+    ulimits:
+      nproc: 65535
+      nofile:
+          soft: 65535
+          hard: 65535
+
+
+networks:
+  postgres:
+    driver: bridge
+    enable_ipv6: true
+    driver_opts:
+      com.docker.network.bridge.name: postgres
+      com.docker.network.bridge.enable_icc: "true"
+      com.docker.network.bridge.enable_ip_forwarding: "true"
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+      com.docker.network.bridge.host_binding_ipv4: "0.0.0.0"
+      com.docker.network.bridge.host_binding_ipv6: "::/0"
+      com.docker.network.driver.mtu: 1500
+    ipam:
+      driver: default
+      config:
+      - subnet: 172.22.0.0/24
+        gateway: 172.22.0.1
+      - subnet: fd99::/64
+        gateway: fd99::1

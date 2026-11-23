@@ -482,9 +482,48 @@ autovacuum worker / 预算  : ${AUTOVACUUM_MAX_WORKERS} / ${AUTOVACUUM_COST_LIMI
 SUMMARY
 }
 
+# 机器可读 JSON（供集群模式渲染 Patroni 配置使用）
+emit_json() {
+cat <<JSON
+{
+  "max_connections": ${MAX_CONNECTIONS},
+  "superuser_reserved_connections": ${SUPERUSER_RESERVED},
+  "shared_buffers": "${SHARED_BUFFERS_MB}MB",
+  "effective_cache_size": "${EFFECTIVE_CACHE_SIZE_MB}MB",
+  "maintenance_work_mem": "${MAINTENANCE_WORK_MEM_MB}MB",
+  "work_mem": "${WORK_MEM_MB}MB",
+  "temp_buffers": "${TEMP_BUFFERS_MB}MB",
+  "wal_buffers": "${WAL_BUFFERS_MB}MB",
+  "min_wal_size": "${MIN_WAL_MB}MB",
+  "max_wal_size": "${MAX_WAL_MB}MB",
+  "wal_keep_size": "${WAL_KEEP_MB}MB",
+  "checkpoint_timeout": "15min",
+  "checkpoint_completion_target": 0.9,
+  "wal_compression": "on",
+  "max_parallel_workers": ${MAX_PARALLEL_WORKERS},
+  "max_parallel_workers_per_gather": ${MAX_PARALLEL_WORKERS_PER_GATHER},
+  "max_parallel_maintenance_workers": ${MAX_PARALLEL_MAINTENANCE_WORKERS},
+  "max_worker_processes": ${MAX_WORKER_PROCESSES},
+  "timescaledb.max_background_workers": ${TS_MAX_BACKGROUND_WORKERS},
+  "autovacuum_max_workers": ${AUTOVACUUM_MAX_WORKERS},
+  "autovacuum_vacuum_cost_limit": ${AUTOVACUUM_COST_LIMIT},
+  "autovacuum_naptime": "10s",
+  "random_page_cost": 1.1,
+  "effective_io_concurrency": ${EFFECTIVE_IO_CONCURRENCY},
+  "maintenance_io_concurrency": ${MAINTENANCE_IO_CONCURRENCY},
+  "max_locks_per_transaction": ${MAX_LOCKS_PER_TRANSACTION},
+  "max_wal_senders": ${MAX_WAL_SENDERS},
+  "max_replication_slots": ${MAX_REPLICATION_SLOTS},
+  "shared_preload_libraries": "timescaledb,pg_stat_monitor",
+  "huge_pages": "off"
+}
+JSON
+}
+
 case "$FORMAT" in
     conf)            emit_conf ;;
     yaml|--patroni)  emit_yaml ;;
+    json)            emit_json ;;
     summary)         emit_summary ;;
-    *)               echo "未知格式: $FORMAT（可选: conf | yaml | --patroni | summary）" >&2; exit 2 ;;
+    *)               echo "未知格式: $FORMAT（可选: conf | yaml | --patroni | json | summary）" >&2; exit 2 ;;
 esac

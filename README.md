@@ -47,6 +47,7 @@
 | `ssl-cert`、`lsb-release` | postgresql-common 依赖 |
 | `rsync`、`zstd`、`xz-utils`、`numactl`、`net-tools`、`ncat`、`debsums` | 备份恢复与诊断工具 |
 | `locales`、`tzdata`、`ca-certificates` | 本地化、时区、TLS 根证书 |
+| `etcd-server`、`etcd-client` | 3 节点集群模式的 DCS（Patroni 依赖 etcd） |
 
 运行阶段环境变量：
 
@@ -58,17 +59,24 @@
 | `PATRONI_HOME` / `PATRONI_VERSION` / `GOSU_VERSION` | Patroni venv 路径与组件版本 |
 | `LANG` / `TZ` | `zh_CN.UTF-8` / `Asia/Shanghai` |
 
-构建末尾会自检 `gosu`、`patroni`、`patronictl`、`postgres`、`pgbackrest`、`pgbouncer` 可执行，
-并校验 `timescaledb.so`、`pg_stat_monitor.so`、`vector.so` 存在，任一缺失则构建失败。
+构建末尾会自检 `gosu`、`patroni`、`patronictl`、`postgres`、`pgbackrest`、`pgbouncer`、
+`etcd`、`etcdctl`、`PyYAML` 可执行/可用，并校验 `timescaledb.so`、`pg_stat_monitor.so`、
+`vector.so` 存在，任一缺失则构建失败。
 
 ## 目录结构
 
 ```
 postgres-docker/
 ├── Dockerfile                          # 多阶段构建文件
+├── docker-compose.yml                  # 单机部署（1 节点）
+├── docker-compose.cluster.yml          # 3 节点集群（每节点 etcd + Patroni + PostgreSQL）
+├── .env.example                        # 环境变量样例（复制为 .env）
+├── conf/patroni/patroni.yml.tmpl       # 集群模式 Patroni 配置模板
 ├── scripts/
-│   ├── docker-entrypoint.sh            # 容器入口（内存计算 + Patroni 集成）
-│   ├── postgresql-config-tuner.sh      # 内存/CPU 自动计算脚本
+│   ├── docker-entrypoint.sh            # 单机入口（自动调优 + 独立运行 PostgreSQL）
+│   ├── cluster-entrypoint.sh           # 集群入口（etcd + Patroni + PostgreSQL）
+│   ├── postgresql-config-tuner.sh      # CPU/内存/连接数自动计算（conf/yaml/json/summary）
+│   ├── render-patroni-config.py        # 渲染 Patroni 配置并合并自动调优参数
 │   └── update-version.sh               # 组件版本号同步脚本（GitHub API）
 └── .github/workflows/
     ├── docker-publish.yml              # 构建并推送 Docker Hub + 华为云 SWR
@@ -94,6 +102,67 @@ docker run -d --name postgres \
   -v pgdata:/data/postgres \
   iflyelf/postgres:latest
 ```
+
+## 单机部署（docker compose）
+
+```bash
+cp .env.example .env          # 修改 POSTGRES_PASSWORD 等
+docker compose up -d
+docker compose logs -f postgres
+```
+
+`docker-compose.yml` 要点：
+
+| 项目 | 配置 |
+| --- | --- |
+| 镜像 | `iflyelf/postgres:latest`（可换成 SWR 地址） |
+| 数据/归档/日志 | `./data/postgres`、`./archive/postgres`、`./logs/postgres` |
+| 网络 | 自定义桥接网络 `postgres`，固定 IP `172.22.0.2`（含 IPv6 `fd99::2`） |
+| 时区 | 挂载宿主机 `/usr/share/zoneinfo`、`/etc/localtime` |
+| 共享内存 | `shm_size: 1gb`（并行查询/大排序需要） |
+| 健康检查 | `pg_isready`，每 30s 一次 |
+| 初始化参数 | `POSTGRES_INITDB_ARGS` 统一使用中文 UTF-8 locale |
+| 自动调优 | 通过 `.env` 的 `PG_MEMORY_LIMIT` / `PG_CPU_LIMIT` / `PG_MAX_CONNECTIONS` 覆盖 |
+| 自定义参数 | 取消注释 `./conf/postgres/99-custom.conf` 挂载，覆盖自动调优结果 |
+
+## 3 节点集群（docker compose + Patroni + etcd）
+
+每个节点容器内同时运行 **etcd（DCS）+ Patroni + PostgreSQL**，3 个 etcd 成员组成 quorum=2 的集群，
+可容忍 1 个节点故障；Patroni 负责选主、流复制与自动故障切换。
+
+```bash
+cp .env.example .env          # 必须修改 POSTGRES_PASSWORD / REPLICATION_PASSWORD / REWIND_PASSWORD
+docker compose -f docker-compose.cluster.yml up -d
+
+# 查看集群状态（任意节点执行）
+docker exec pg1 patronictl -c /tmp/patroni.yml list
+# + Cluster: postgres-cluster (7389...) ----+-----------+----+-----------+
+# | Member | Host  | Role    | State     | TL | Lag in MB |
+# +--------+-------+---------+-----------+----+-----------+
+# | pg1    | pg1   | Leader  | running   |  1 |           |
+# | pg2    | pg2   | Replica | streaming |  1 |         0 |
+# | pg3    | pg3   | Replica | streaming |  1 |         0 |
+```
+
+| 节点 | PostgreSQL 端口 | Patroni REST API | 固定 IP | 数据目录 |
+| --- | --- | --- | --- | --- |
+| pg1 | `5432` | `8008` | `172.23.0.11` | `./data/pg1` |
+| pg2 | `5433` | `8009` | `172.23.0.12` | `./data/pg2` |
+| pg3 | `5434` | `8010` | `172.23.0.13` | `./data/pg3` |
+
+集群要点：
+
+- **DCS**：镜像内置 `etcd` / `etcdctl`（Ubuntu 包），每节点启动一个成员，数据在 `./data/pgN/etcd`
+- **配置模板**：`conf/patroni/patroni.yml.tmpl`，占位符由环境变量填充；运行时渲染到容器内 `/tmp/patroni.yml`
+- **自动调优**：每个节点按自身 CPU/内存自动计算参数，合并进 Patroni 的 `postgresql.parameters`
+  （日志前缀 `>>> [render]`）；设 `CLUSTER_AUTOTUNE=false` 可改用模板默认参数
+- **故障切换**：`docker exec pg1 patronictl -c /tmp/patroni.yml switchover` 手动切换；
+  直接 `docker stop pg2` 可验证自动 failover
+- **连接**：应用连主库时可连任一节点的 `5432`（固定 IP），或按 `patronictl list` 的 Leader 手工指向；
+  生产建议在前面加 HAProxy/pgbouncer 做读写分离
+- **扩缩容**：将新节点加入两处 `ETCD_INITIAL_CLUSTER` 与 `ETCD_HOSTS`，并用相同 `PATRONI_SCOPE` 启动即可
+
+> 集群密码写入 `patroni.yml.tmpl` 的占位符，由 `.env` 注入，不要提交 `.env`（已在 `.gitignore` 中忽略）。
 
 ## CPU / 内存自动调优
 

@@ -143,12 +143,13 @@ ENV PGDATA=$PGDATA
 
 # 运行依赖(ubuntu:lite 未包含的部分)
 #   python3                       -> Patroni venv 解释器
-#   python3-yaml/python3-psycopg2 -> 兼容 Operator 侧可能调用的系统 python 脚本
+#   python3-yaml/python3-psycopg2 -> Patroni 配置渲染与系统脚本
 #   libnss-wrapper                -> Operator 以任意 UID 运行时伪造 passwd
 #   sudo                          -> postgres 用户受限提权(mkdir/chmod/chown)
 #   libdbd-pg-perl/libdbi-perl    -> pgbadger 等 perl 工具
 #   ssl-cert/lsb-release          -> postgresql-common 依赖与脚本识别发行版
 #   rsync/zstd/numactl/...        -> 备份/恢复与诊断工具
+#   etcd-server/etcd-client       -> 3 节点集群模式的 DCS（Patroni 依赖 etcd）
 ARG PKG_DEPS="\
     python3 \
     python3-yaml \
@@ -168,7 +169,9 @@ ARG PKG_DEPS="\
     debsums \
     locales \
     tzdata \
-    ca-certificates"
+    ca-certificates \
+    etcd-server \
+    etcd-client"
 ENV PKG_DEPS=$PKG_DEPS
 
 # Percona PostgreSQL 依赖包
@@ -237,6 +240,9 @@ RUN set -eux && \
     postgres --version && \
     pgbackrest version && \
     pgbouncer --version && \
+    etcd --version && \
+    etcdctl version && \
+    python3 -c 'import yaml; print("PyYAML", yaml.__version__)' && \
     test -f /usr/lib/postgresql/${PG_MAJOR}/lib/timescaledb.so && \
     test -f /usr/lib/postgresql/${PG_MAJOR}/lib/pg_stat_monitor.so && \
     test -f /usr/lib/postgresql/${PG_MAJOR}/lib/vector.so
@@ -280,8 +286,14 @@ RUN set -eux && \
 # ***** 拷贝脚本文件 *****
 COPY --chmod=755 ["scripts/docker-entrypoint.sh", "/docker-entrypoint.sh"]
 COPY --chmod=755 ["scripts/postgresql-config-tuner.sh", "/usr/local/bin/postgresql-config-tuner.sh"]
+# 集群模式（3 节点 etcd + Patroni）：入口、配置渲染脚本与模板
+COPY --chmod=755 ["scripts/cluster-entrypoint.sh", "/usr/local/bin/cluster-entrypoint.sh"]
+COPY --chmod=755 ["scripts/render-patroni-config.py", "/usr/local/bin/render-patroni-config.py"]
+COPY ["conf/patroni/patroni.yml.tmpl", "/etc/patroni/patroni.yml.tmpl"]
 
-RUN chown postgres:postgres /docker-entrypoint.sh /usr/local/bin/postgresql-config-tuner.sh
+RUN chown postgres:postgres /docker-entrypoint.sh /usr/local/bin/postgresql-config-tuner.sh \
+        /usr/local/bin/cluster-entrypoint.sh /usr/local/bin/render-patroni-config.py && \
+    chmod -R 755 /etc/patroni && chown -R postgres:postgres /etc/patroni
 
 # ***** 容器信号处理 *****
 STOPSIGNAL SIGQUIT
@@ -296,7 +308,8 @@ VOLUME ${PGHOME}
 ENTRYPOINT ["/docker-entrypoint.sh"]
 
 # ***** 监听端口 *****
-EXPOSE 5432 8008
+#   5432 PostgreSQL / 8008 Patroni REST API / 2379-2380 etcd(集群模式)
+EXPOSE 5432 8008 2379 2380
 
 # ***** 用户 *****
 USER 26

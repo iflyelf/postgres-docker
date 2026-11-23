@@ -1,0 +1,75 @@
+# ==============================================================================
+# Patroni 配置模板（3 节点集群，由 scripts/render-patroni-config.py 渲染）
+#   占位符为双下划线包裹的大写环境变量名，运行时从环境变量取值
+#   （见 docker-compose.cluster.yml）；渲染后会把自动调优参数合并进
+#   postgresql.parameters（CLUSTER_AUTOTUNE=false 可关闭）
+# ==============================================================================
+scope: __PATRONI_SCOPE__
+namespace: /service/
+name: __PATRONI_NAME__
+
+restapi:
+  listen: 0.0.0.0:8008
+  connect_address: __PATRONI_CONNECT_HOST__:8008
+
+etcd3:
+  hosts: __ETCD_HOSTS__
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    synchronous_mode: false
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        wal_level: replica
+        hot_standby: "on"
+        wal_log_hints: "on"
+        archive_mode: "on"
+        archive_command: "cp -f %p ../archive/%f"
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+    - locale: zh_CN.UTF-8
+  pg_hba:
+    - local all all peer
+    - host all all 0.0.0.0/0 scram-sha-256
+    - host replication replicator 0.0.0.0/0 scram-sha-256
+  users:
+    admin:
+      password: __POSTGRES_PASSWORD__
+      options:
+        - superuser
+        - createdb
+        - createrole
+
+postgresql:
+  listen: 0.0.0.0:5432
+  connect_address: __PATRONI_CONNECT_HOST__:5432
+  data_dir: /data/postgres/data
+  bin_dir: /usr/lib/postgresql/__PG_MAJOR__/bin
+  authentication:
+    replication:
+      username: replicator
+      password: __REPLICATION_PASSWORD__
+    superuser:
+      username: __POSTGRES_USER__
+      password: __POSTGRES_PASSWORD__
+    rewind:
+      username: rewind_user
+      password: __REWIND_PASSWORD__
+  parameters:
+    unix_socket_directories: /var/run/postgresql
+    timescaledb.telemetry_level: "off"
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+
+log:
+  level: __PATRONI_LOG_LEVEL__

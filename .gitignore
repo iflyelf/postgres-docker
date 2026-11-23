@@ -1,0 +1,6 @@
+# 本地运行数据(不要提交)
+.env
+data/
+archive/
+logs/
+*.log

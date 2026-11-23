@@ -2,3 +2,5 @@
 .github
 *.log
 README.md
+docker-compose*.yml
+.env
