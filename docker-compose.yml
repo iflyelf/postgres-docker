@@ -19,6 +19,8 @@ services:
     # 允许容器中运行一些特权命令
     # PostgreSQL 仅需普通用户权限, 无需特权模式; 如需 modprobe 等场景再开启
     # privileged: true
+    # 以 root 启动: 修正宿主挂载目录(默认 root 属主)的属主后自动降权到 postgres(26)
+    user: "0:0"
     # 指定容器退出后的重启策略为始终重启
     restart: always
     # 指定容器的内核能力(capacity)分配

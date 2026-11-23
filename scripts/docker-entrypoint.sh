@@ -53,6 +53,59 @@ ensure_include_dir() {
 }
 
 # ==============================================================================
+# 创建应用数据库（POSTGRES_DB 与超级用户同名时由 initdb 自动建立，无需处理）
+#   仅在首次初始化时执行：临时以本地 socket 启动、建库、再关闭
+# ==============================================================================
+create_app_database() {
+    local db="${POSTGRES_DB:-}"
+    local user="${POSTGRES_USER:-postgres}"
+    [ -n "${db}" ] || return 0
+    [ "${db}" = "${user}" ] && return 0
+    [ "${NEED_CREATE_DB:-0}" = "1" ] || return 0
+
+    local conf="${PGDATA}/postgresql.conf"
+    cp -a "${conf}" "${conf}.bootstrap.bak"
+    # 初始化期间仅监听本地 socket，避免短暂对外暴露
+    printf "\nlisten_addresses = ''\n" >> "${conf}"
+    # 库名只允许常规标识符字符，避免注入/引号问题
+    case "${db}" in
+        *[!A-Za-z0-9_-]*)
+            echo ">>> [entrypoint] ERROR: POSTGRES_DB 含非法字符（仅支持字母/数字/下划线/短横线）: ${db}" >&2
+            return 1 ;;
+    esac
+
+    echo ">>> [entrypoint] 创建数据库 ${db} ..."
+    "${PGBIN}/pg_ctl" -D "${PGDATA}" -l "${PGHOME}/logs/bootstrap.log" -w -t 120 start
+    if ! "${PGBIN}/psql" -h /var/run/postgresql -U "${user}" -d postgres -v ON_ERROR_STOP=1 \
+            -tAc "SELECT 1 FROM pg_database WHERE datname = '${db}'" | grep -q 1; then
+        "${PGBIN}/psql" -h /var/run/postgresql -U "${user}" -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE DATABASE \"${db}\""
+    fi
+    "${PGBIN}/pg_ctl" -D "${PGDATA}" -m fast -w stop
+    mv -f "${conf}.bootstrap.bak" "${conf}"
+    echo ">>> [entrypoint] 数据库 ${db} 就绪"
+}
+
+# ==============================================================================
+# 场景 0：以 root 启动（compose 挂载宿主目录时需要）
+#   修正挂载目录属主（宿主目录默认 root 属主，postgres 用户无法写入），
+#   随后降权到 postgres(26) 重新执行本脚本
+# ==============================================================================
+if [ "$(id -u)" = "0" ]; then
+    echo ">>> [entrypoint] 以 root 启动，修正数据目录属主后降权到 postgres"
+    mkdir -p "${PGHOME}/data" "${PGHOME}/logs" "${PGHOME}/run" \
+             "${PGHOME}/archive" "${PGHOME}/conf.d" /var/run/postgresql /var/log/postgresql
+    for d in "${PGHOME}" "${PGHOME}/data" "${PGHOME}/logs" "${PGHOME}/run" \
+             "${PGHOME}/archive" "${PGHOME}/conf.d" /var/run/postgresql /var/log/postgresql; do
+        # 已由 postgres 拥有的目录不递归处理，避免大数据目录启动变慢
+        if [ "$(stat -c %u "${d}")" != "26" ]; then
+            chown -R postgres:postgres "${d}"
+        fi
+    done
+    exec gosu postgres "$0" "$@"
+fi
+
+# ==============================================================================
 # 场景 1：由 Patroni 接管（Percona Operator 环境）
 # Patroni 会以 `patroni /path/to/config.yml` 方式启动，
 # 此时仅生成调优片段供 Patroni 的 postgresql.parameters 参考，然后透传执行
@@ -92,6 +145,7 @@ if [ ! -s "${PGDATA}/PG_VERSION" ]; then
     echo "host all all 0.0.0.0/0 scram-sha-256" >> "${PGDATA}/pg_hba.conf"
     echo "listen_addresses = '*'" >> "${PGDATA}/postgresql.conf"
     # shared_preload_libraries / 内存参数全部由自动调优配置提供，此处不再重复写入
+    NEED_CREATE_DB=1
 fi
 
 # 确保主配置引入自动调优目录（旧数据目录自动补齐）
@@ -99,6 +153,9 @@ ensure_include_dir
 
 # 每次启动都重新计算调优配置（内存/CPU 可能变化）
 generate_tuned_config
+
+# 首次初始化后创建 POSTGRES_DB（与官方镜像行为一致）
+create_app_database
 
 echo ">>> [entrypoint] 启动 postgres..."
 exec "${PGBIN}/postgres" -D "${PGDATA}"
