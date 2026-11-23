@@ -35,6 +35,9 @@ bootstrap:
     - encoding: UTF8
     - data-checksums
     - locale: zh_CN.UTF-8
+    # 强制 TCP 连接使用 scram-sha-256（initdb 默认 auth=trust，会让 127.0.0.1 免密）
+    - auth-local: trust
+    - auth-host: scram-sha-256
   pg_hba:
     - local all all peer
     - host all all 0.0.0.0/0 scram-sha-256
