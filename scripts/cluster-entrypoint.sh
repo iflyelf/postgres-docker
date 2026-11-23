@@ -67,6 +67,8 @@ prepare_dirs() {
         fi
     done
     chmod 700 "${PGDATA}"
+    # etcd 建议数据目录仅属主可访问（否则启动日志会告警权限过宽）
+    chmod 700 "${ETCD_DATA_DIR}"
     log "数据目录就绪: PGDATA=${PGDATA} ETCD_DATA_DIR=${ETCD_DATA_DIR}"
 }
 
@@ -75,7 +77,13 @@ prepare_dirs() {
 # ==============================================================================
 start_etcd() {
     log "启动 etcd: name=${ETCD_NAME} state=${ETCD_INITIAL_CLUSTER_STATE}"
-    gosu postgres etcd \
+    # etcd 3.5 会拒绝"环境变量与命令行参数同时设置"的项（ETCD_* 与 --flag 冲突），
+    # 这里先清掉所有 ETCD_* 环境变量，统一由下面的命令行参数控制
+    local clean_env=() v
+    for v in $(compgen -e | grep -E '^ETCD_' || true); do
+        clean_env+=(-u "$v")
+    done
+    gosu postgres env "${clean_env[@]}" etcd \
         --name "${ETCD_NAME}" \
         --data-dir "${ETCD_DATA_DIR}" \
         --listen-peer-urls "${ETCD_LISTEN_PEER_URLS:-http://0.0.0.0:2380}" \

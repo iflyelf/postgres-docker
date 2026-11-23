@@ -79,12 +79,15 @@ RUN set -eux && \
 
 # ***** 3. 安装 Patroni 到独立 venv(产物: ${PATRONI_HOME}) *****
 # builder 与 runtime 同为 Ubuntu resolute, 系统 python3 版本一致, venv 可直接拷贝复用
+# 注意: 必须带 etcd3 extra(python-etcd + dnspython), 否则 etcd3 DCS 会被静默跳过,
+#       集群模式启动时报 "Can not find suitable configuration of distributed configuration store"
 RUN set -eux && \
     python3 -m venv ${PATRONI_HOME} && \
     ${PATRONI_HOME}/bin/pip install --no-cache-dir --upgrade pip && \
     ${PATRONI_HOME}/bin/pip install --no-cache-dir \
-        "patroni[psycopg3]==${PATRONI_VERSION}" \
+        "patroni[psycopg3,etcd3]==${PATRONI_VERSION}" \
         python-json-logger && \
+    ${PATRONI_HOME}/bin/python -c 'import etcd, dns.resolver; print("patroni etcd3 DCS 依赖就绪")' && \
     ${PATRONI_HOME}/bin/patroni --version && \
     # 清理字节码缓存, 减小体积
     find ${PATRONI_HOME} -name '__pycache__' -type d -prune -exec rm -rf {} +

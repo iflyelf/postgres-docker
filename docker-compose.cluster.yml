@@ -164,7 +164,7 @@ networks:
     driver: bridge
     enable_ipv6: true
     driver_opts:
-      com.docker.network.bridge.name: postgres-cluster
+      com.docker.network.bridge.name: pg-cluster
       com.docker.network.bridge.enable_icc: "true"
       com.docker.network.bridge.enable_ip_forwarding: "true"
       com.docker.network.bridge.enable_ip_masquerade: "true"
