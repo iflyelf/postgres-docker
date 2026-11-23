@@ -165,6 +165,10 @@ docker exec pg1 patronictl -c /run/patroni/patroni.yml list
 
 网络名为 `pg_cluster_net`，网段 `172.22.1.0/24`（网关 `172.22.1.1`）+ `fe9a:1::/64`（网关 `fe9a:1::1`）。
 
+> 集群模式默认超级用户密码同为 `ysyh!9Sky`（`.env` 可覆盖）；`POSTGRES_DB` 仅单机模式自动创建，
+> 集群请在选主成功后手工建库：`docker exec pg1 psql -U postgres -c 'CREATE DATABASE appdb;'`。
+> 认证方式：本地 socket `trust`（容器内部），所有 TCP 连接强制 `scram-sha-256`。
+
 集群要点：
 
 - **DCS**：独立 `etcd` 容器（镜像内置 Ubuntu 的 etcd 3.5），首次引导 `state=new`，重启自动切 `existing`；
