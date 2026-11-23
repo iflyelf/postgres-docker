@@ -111,6 +111,9 @@ def main() -> int:
         dcs_pg["parameters"] = dcs_params
         print(f">>> [render] 合并自动调优参数 {added} 项到 postgresql.parameters")
 
+    # 先删除旧文件再创建：避免上一轮生成、属主为 postgres 的只读文件导致 PermissionError
+    if os.path.exists(args.output):
+        os.unlink(args.output)
     with open(args.output, "w", encoding="utf-8") as fh:
         fh.write(dump_yaml(config))
     # Patroni 以 postgres 用户运行，需可读

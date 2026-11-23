@@ -1,38 +1,34 @@
 # ==============================================================================
-# 3 节点高可用集群（每节点 = etcd + Patroni + PostgreSQL，同容器）
+# 3 节点高可用集群（etcd 独立容器 + Patroni + PostgreSQL）
 #
-#   启动：docker compose -f docker-compose.cluster.yml up -d
+#   启动：docker compose -f docker-compose.cluster.yml up -d（需先 cp .env.example .env）
 #   状态：docker exec pg1 patronictl -c /tmp/patroni.yml list
 #   停止：docker compose -f docker-compose.cluster.yml down
 #
-# 说明：
-#   - 3 个节点各自运行一个 etcd 成员组成 DCS 集群（quorum=2，可容忍 1 节点故障）
-#   - Patroni 自动选主、流复制、故障切换；数据目录挂载在 ./data/pg{1,2,3}
-#   - 每个节点启动时按自身 CPU/内存自动调优 PostgreSQL 参数
-#     （CLUSTER_AUTOTUNE=false 可关闭，改用模板参数）
-#   - 单机部署请用 docker-compose.yml
+# 架构：
+#   etcd1/2/3   独立 etcd 容器组成 DCS 集群（quorum=2，可容忍 1 节点故障）
+#   pg1/2/3     各自的 Patroni + PostgreSQL，自动选主/流复制/故障切换
+#   etcd 与 PostgreSQL 生命周期解耦：重启数据库节点不会影响 DCS，反之亦然
+#
+# 资源自动调优：每个 pg 节点按自身 CPU/内存计算 PostgreSQL 参数
+#   （CLUSTER_AUTOTUNE=false 可关闭，改用模板参数）
+# 单机部署请用 docker-compose.yml
 # ==============================================================================
 
 name: postgres-cluster
 
+# ==================== PostgreSQL 节点公共配置 ====================
 x-pg-common: &pg-common
   image: iflyelf/postgres:latest
-  # 集群入口：容器内先启动 etcd，再启动 Patroni 托管 PostgreSQL
+  # 集群入口：渲染 Patroni 配置并启动 Patroni 托管 PostgreSQL
   entrypoint: ["/usr/local/bin/cluster-entrypoint.sh"]
-  # 需 root 启动以修正挂载目录属主，随后自动降权到 postgres(26) 运行 etcd/Patroni
+  # 需 root 启动以修正挂载目录属主，随后自动降权到 postgres(26)
   user: "0:0"
-  # 模拟一个伪终端
   tty: true
-  # 打开标准输入,可以接受外部输入
   stdin_open: true
-  # 指定容器退出后的重启策略为始终重启
   restart: always
   # 共享内存：PostgreSQL 并行查询/大排序需要
   shm_size: 1gb
-  # 指定容器的内核能力(capacity)分配
-  # PostgreSQL 仅需普通用户权限, 无需特权模式
-  # privileged: true
-  # 指定容器的 ulimits 限制值
   ulimits:
     nproc: 65535
     nofile:
@@ -41,18 +37,17 @@ x-pg-common: &pg-common
   environment: &pg-env
     # ---------- PostgreSQL 初始化 ----------
     POSTGRES_USER: ${POSTGRES_USER:-postgres}
-    # 超级用户密码(必填, 放在同目录 .env 中)
+    # 超级用户密码（必填，放在同目录 .env 中）
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
-    # 流复制用户密码
     REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:-repl-pass}
-    # pg_rewind 用户密码
     REWIND_PASSWORD: ${REWIND_PASSWORD:-rewind-pass}
-    # ---------- Patroni ----------
+    # ---------- Patroni / DCS ----------
     PATRONI_SCOPE: ${PATRONI_SCOPE:-postgres-cluster}
     PATRONI_LOG_LEVEL: ${PATRONI_LOG_LEVEL:-INFO}
-    # DCS: 3 个 etcd 成员
-    ETCD_HOSTS: 172.22.1.11:2379,172.22.1.12:2379,172.22.1.13:2379
-    # ---------- 自动调优(可选) ----------
+    # 使用独立 etcd 容器（不在此容器内启动 etcd）
+    ETCD_EMBEDDED: "false"
+    ETCD_HOSTS: 172.22.1.21:2379,172.22.1.22:2379,172.22.1.23:2379
+    # ---------- 自动调优（可选） ----------
     PG_MEMORY_LIMIT: ${PG_MEMORY_LIMIT:-}
     PG_CPU_LIMIT: ${PG_CPU_LIMIT:-}
     PG_MAX_CONNECTIONS: ${PG_MAX_CONNECTIONS:-}
@@ -61,9 +56,95 @@ x-pg-common: &pg-common
     TZ: ${TZ:-Asia/Shanghai}
     LANG: ${LANG:-zh_CN.UTF-8}
 
+# ==================== etcd 公共配置 ====================
+x-etcd-common: &etcd-common
+  image: iflyelf/postgres:latest
+  # 独立 etcd 容器：修正数据目录权限后降权运行 etcd
+  entrypoint: ["/usr/local/bin/etcd-entrypoint.sh"]
+  user: "0:0"
+  restart: always
+  environment: &etcd-env
+    ETCD_DATA_DIR: /etcd-data
+    ETCD_INITIAL_CLUSTER_STATE: ""
+    ETCD_INITIAL_CLUSTER_TOKEN: ${ETCD_CLUSTER_TOKEN:-postgres-cluster}
+    ETCD_INITIAL_CLUSTER: etcd1=http://172.22.1.21:2380,etcd2=http://172.22.1.22:2380,etcd3=http://172.22.1.23:2380
+    TZ: ${TZ:-Asia/Shanghai}
+
 services:
 
-  # ==================== 节点 1（初始主库候选） ====================
+  # ==================== DCS: etcd 1 ====================
+  etcd1:
+    <<: *etcd-common
+    hostname: etcd1
+    container_name: etcd1
+    environment:
+      <<: *etcd-env
+      ETCD_NAME: etcd1
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://172.22.1.21:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://172.22.1.21:2379
+    volumes:
+      - ./data/etcd1:/etcd-data:rw,cached
+    networks:
+      pg_cluster_net:
+        ipv4_address: 172.22.1.21
+        ipv6_address: fe9a:1::21
+    # 仅集群内部使用，如需外部访问可放开 2379
+    # ports:
+    # - "12379:2379"
+    healthcheck:
+      test: ["CMD-SHELL", "etcdctl --endpoints=http://127.0.0.1:2379 --command-timeout=3s endpoint health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ==================== DCS: etcd 2 ====================
+  etcd2:
+    <<: *etcd-common
+    hostname: etcd2
+    container_name: etcd2
+    environment:
+      <<: *etcd-env
+      ETCD_NAME: etcd2
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://172.22.1.22:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://172.22.1.22:2379
+    volumes:
+      - ./data/etcd2:/etcd-data:rw,cached
+    networks:
+      pg_cluster_net:
+        ipv4_address: 172.22.1.22
+        ipv6_address: fe9a:1::22
+    healthcheck:
+      test: ["CMD-SHELL", "etcdctl --endpoints=http://127.0.0.1:2379 --command-timeout=3s endpoint health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ==================== DCS: etcd 3 ====================
+  etcd3:
+    <<: *etcd-common
+    hostname: etcd3
+    container_name: etcd3
+    environment:
+      <<: *etcd-env
+      ETCD_NAME: etcd3
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://172.22.1.23:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://172.22.1.23:2379
+    volumes:
+      - ./data/etcd3:/etcd-data:rw,cached
+    networks:
+      pg_cluster_net:
+        ipv4_address: 172.22.1.23
+        ipv6_address: fe9a:1::23
+    healthcheck:
+      test: ["CMD-SHELL", "etcdctl --endpoints=http://127.0.0.1:2379 --command-timeout=3s endpoint health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ==================== PostgreSQL 节点 1 ====================
   pg1:
     <<: *pg-common
     hostname: pg1
@@ -73,13 +154,9 @@ services:
       PATRONI_NAME: pg1
       PATRONI_CONNECT_HOST: 172.22.1.11
       ETCD_NAME: pg1
-      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://172.22.1.11:2380
-      ETCD_ADVERTISE_CLIENT_URLS: http://172.22.1.11:2379
-      ETCD_INITIAL_CLUSTER: pg1=http://172.22.1.11:2380,pg2=http://172.22.1.12:2380,pg3=http://172.22.1.13:2380
     volumes:
-      # 数据目录（含 etcd 数据 + PostgreSQL 数据/归档/日志）
+      # PostgreSQL 数据/归档/日志
       - ./data/pg1:/data:rw,cached
-      # 同步宿主机时区与时间
       - /usr/share/zoneinfo:/usr/share/zoneinfo:ro,cached
       - /etc/localtime:/etc/localtime:ro,cached
     networks:
@@ -89,6 +166,10 @@ services:
     ports:
     - "5432:5432"    # PostgreSQL
     - "8008:8008"    # Patroni REST API
+    depends_on:
+      - etcd1
+      - etcd2
+      - etcd3
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432"]
       interval: 30s
@@ -96,7 +177,7 @@ services:
       retries: 5
       start_period: 90s
 
-  # ==================== 节点 2 ====================
+  # ==================== PostgreSQL 节点 2 ====================
   pg2:
     <<: *pg-common
     hostname: pg2
@@ -106,9 +187,6 @@ services:
       PATRONI_NAME: pg2
       PATRONI_CONNECT_HOST: 172.22.1.12
       ETCD_NAME: pg2
-      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://172.22.1.12:2380
-      ETCD_ADVERTISE_CLIENT_URLS: http://172.22.1.12:2379
-      ETCD_INITIAL_CLUSTER: pg1=http://172.22.1.11:2380,pg2=http://172.22.1.12:2380,pg3=http://172.22.1.13:2380
     volumes:
       - ./data/pg2:/data:rw,cached
       - /usr/share/zoneinfo:/usr/share/zoneinfo:ro,cached
@@ -120,6 +198,10 @@ services:
     ports:
     - "5433:5432"
     - "8009:8008"
+    depends_on:
+      - etcd1
+      - etcd2
+      - etcd3
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432"]
       interval: 30s
@@ -127,7 +209,7 @@ services:
       retries: 5
       start_period: 90s
 
-  # ==================== 节点 3 ====================
+  # ==================== PostgreSQL 节点 3 ====================
   pg3:
     <<: *pg-common
     hostname: pg3
@@ -137,9 +219,6 @@ services:
       PATRONI_NAME: pg3
       PATRONI_CONNECT_HOST: 172.22.1.13
       ETCD_NAME: pg3
-      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://172.22.1.13:2380
-      ETCD_ADVERTISE_CLIENT_URLS: http://172.22.1.13:2379
-      ETCD_INITIAL_CLUSTER: pg1=http://172.22.1.11:2380,pg2=http://172.22.1.12:2380,pg3=http://172.22.1.13:2380
     volumes:
       - ./data/pg3:/data:rw,cached
       - /usr/share/zoneinfo:/usr/share/zoneinfo:ro,cached
@@ -151,6 +230,10 @@ services:
     ports:
     - "5434:5432"
     - "8010:8008"
+    depends_on:
+      - etcd1
+      - etcd2
+      - etcd3
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432"]
       interval: 30s

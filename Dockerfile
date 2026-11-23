@@ -291,11 +291,13 @@ COPY --chmod=755 ["scripts/docker-entrypoint.sh", "/docker-entrypoint.sh"]
 COPY --chmod=755 ["scripts/postgresql-config-tuner.sh", "/usr/local/bin/postgresql-config-tuner.sh"]
 # 集群模式（3 节点 etcd + Patroni）：入口、配置渲染脚本与模板
 COPY --chmod=755 ["scripts/cluster-entrypoint.sh", "/usr/local/bin/cluster-entrypoint.sh"]
+COPY --chmod=755 ["scripts/etcd-entrypoint.sh", "/usr/local/bin/etcd-entrypoint.sh"]
 COPY --chmod=755 ["scripts/render-patroni-config.py", "/usr/local/bin/render-patroni-config.py"]
 COPY ["conf/patroni/patroni.yml.tmpl", "/etc/patroni/patroni.yml.tmpl"]
 
 RUN chown postgres:postgres /docker-entrypoint.sh /usr/local/bin/postgresql-config-tuner.sh \
-        /usr/local/bin/cluster-entrypoint.sh /usr/local/bin/render-patroni-config.py && \
+        /usr/local/bin/cluster-entrypoint.sh /usr/local/bin/etcd-entrypoint.sh \
+        /usr/local/bin/render-patroni-config.py && \
     chmod -R 755 /etc/patroni && chown -R postgres:postgres /etc/patroni
 
 # ***** 容器信号处理 *****

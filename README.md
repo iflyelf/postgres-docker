@@ -74,7 +74,8 @@ postgres-docker/
 ├── conf/patroni/patroni.yml.tmpl       # 集群模式 Patroni 配置模板
 ├── scripts/
 │   ├── docker-entrypoint.sh            # 单机入口（自动调优 + 独立运行 PostgreSQL）
-│   ├── cluster-entrypoint.sh           # 集群入口（etcd + Patroni + PostgreSQL）
+│   ├── cluster-entrypoint.sh           # 集群入口（Patroni + PostgreSQL，可选嵌入式 etcd）
+│   ├── etcd-entrypoint.sh              # 独立 etcd 容器入口（DCS）
 │   ├── postgresql-config-tuner.sh      # CPU/内存/连接数自动计算（conf/yaml/json/summary）
 │   ├── render-patroni-config.py        # 渲染 Patroni 配置并合并自动调优参数
 │   └── update-version.sh               # 组件版本号同步脚本（GitHub API）
@@ -127,43 +128,58 @@ docker compose logs -f postgres
 
 ## 3 节点集群（docker compose + Patroni + etcd）
 
-每个节点容器内同时运行 **etcd（DCS）+ Patroni + PostgreSQL**，3 个 etcd 成员组成 quorum=2 的集群，
-可容忍 1 个节点故障；Patroni 负责选主、流复制与自动故障切换。
+架构：**etcd 独立容器**（3 个）+ **PostgreSQL 节点**（3 个，各含 Patroni）。
+etcd 与数据库生命周期解耦——重启数据库节点不会影响 DCS，重启 etcd 也不影响数据节点。
+
+```
+etcd1 (172.22.1.21)  etcd2 (172.22.1.22)  etcd3 (172.22.1.23)   ← DCS，quorum=2
+        │                    │                    │
+        └────────────┬───────┴────────────┬───────┘
+                     ▼                    ▼
+              pg1 (172.22.1.11)    pg2/pg3 (172.22.1.12/13)      ← Patroni + PostgreSQL
+```
 
 ```bash
 cp .env.example .env          # 必须修改 POSTGRES_PASSWORD / REPLICATION_PASSWORD / REWIND_PASSWORD
 docker compose -f docker-compose.cluster.yml up -d
 
 # 查看集群状态（任意节点执行）
-docker exec pg1 patronictl -c /tmp/patroni.yml list
-# + Cluster: postgres-cluster (7389...) ----+-----------+----+-----------+
-# | Member | Host  | Role    | State     | TL | Lag in MB |
-# +--------+-------+---------+-----------+----+-----------+
-# | pg1    | pg1   | Leader  | running   |  1 |           |
-# | pg2    | pg2   | Replica | streaming |  1 |         0 |
-# | pg3    | pg3   | Replica | streaming |  1 |         0 |
+docker exec pg1 patronictl -c /run/patroni/patroni.yml list
+# + Cluster: postgres-cluster ---+-----+------------+-----+
+# | Member | Host        | Role    | State     | TL | Lag |
+# | pg1    | 172.22.1.11 | Leader  | running   |  1 |     |
+# | pg2    | 172.22.1.12 | Replica | streaming |  1 |   0 |
+# | pg3    | 172.22.1.13 | Replica | streaming |  1 |   0 |
 ```
 
-| 节点 | PostgreSQL 端口 | Patroni REST API | IPv4 | IPv6 | 数据目录 |
+| 节点 | 角色 | IPv4 | IPv6 | 端口 | 数据目录 |
 | --- | --- | --- | --- | --- | --- |
-| pg1 | `5432` | `8008` | `172.22.1.11` | `fe9a:1::11` | `./data/pg1` |
-| pg2 | `5433` | `8009` | `172.22.1.12` | `fe9a:1::12` | `./data/pg2` |
-| pg3 | `5434` | `8010` | `172.22.1.13` | `fe9a:1::13` | `./data/pg3` |
+| etcd1 | DCS | `172.22.1.21` | `fe9a:1::21` | 2379/2380（仅内网） | `./data/etcd1` |
+| etcd2 | DCS | `172.22.1.22` | `fe9a:1::22` | 2379/2380（仅内网） | `./data/etcd2` |
+| etcd3 | DCS | `172.22.1.23` | `fe9a:1::23` | 2379/2380（仅内网） | `./data/etcd3` |
+| pg1 | PostgreSQL | `172.22.1.11` | `fe9a:1::11` | `5432` / API `8008` | `./data/pg1` |
+| pg2 | PostgreSQL | `172.22.1.12` | `fe9a:1::12` | `5433` / API `8009` | `./data/pg2` |
+| pg3 | PostgreSQL | `172.22.1.13` | `fe9a:1::13` | `5434` / API `8010` | `./data/pg3` |
 
 网络名为 `pg_cluster_net`，网段 `172.22.1.0/24`（网关 `172.22.1.1`）+ `fe9a:1::/64`（网关 `fe9a:1::1`）。
 
 集群要点：
 
-- **DCS**：镜像内置 `etcd` / `etcdctl`（Ubuntu 包），每节点启动一个成员，数据在 `./data/pgN/etcd`
-- **配置模板**：`conf/patroni/patroni.yml.tmpl`，占位符由环境变量填充；运行时渲染到容器内 `/tmp/patroni.yml`
-- **自动调优**：每个节点按自身 CPU/内存自动计算参数，合并进 Patroni 的 `postgresql.parameters`
+- **DCS**：独立 `etcd` 容器（镜像内置 Ubuntu 的 etcd 3.5），首次引导 `state=new`，重启自动切 `existing`；
+  数据持久化在 `./data/etcdN`，重启不影响集群
+- **配置模板**：`conf/patroni/patroni.yml.tmpl`，占位符由环境变量填充；运行时渲染到容器内
+  `/run/patroni/patroni.yml`（root 独占目录，避免重启时文件属主冲突）
+- **自动调优**：每个 pg 节点按自身 CPU/内存自动计算参数，合并进 Patroni 的 `postgresql.parameters`
   （日志前缀 `>>> [render]`）；设 `CLUSTER_AUTOTUNE=false` 可改用模板默认参数
-- **故障切换**：`docker exec pg1 patronictl -c /tmp/patroni.yml switchover` 手动切换；
-  直接 `docker stop pg2` 可验证自动 failover
-- **连接**：应用连主库时可连任一节点的 `5432`（固定 IP），或按 `patronictl list` 的 Leader 手工指向；
+- **故障切换**：`docker exec pg1 patronictl -c /run/patroni/patroni.yml switchover` 手动切换；
+  `docker stop pg2` 可验证自动 failover，`docker start pg2` 会自动 pg_rewind 后以副本回归
+- **连接**：应用连主库时可连任一节点的 `5432`（固定 IP），或按 `patronictl list` 的 Leader 指向；
   生产建议在前面加 HAProxy/pgbouncer 做读写分离
-- **扩缩容**：将新节点加入两处 `ETCD_INITIAL_CLUSTER` 与 `ETCD_HOSTS`，并用相同 `PATRONI_SCOPE` 启动即可
+- **扩缩容**：将新节点加入 `ETCD_INITIAL_CLUSTER` 与 `ETCD_HOSTS`，并用相同 `PATRONI_SCOPE` 启动
+- **嵌入式 etcd（可选）**：把某个 pg 服务的 `ETCD_EMBEDDED` 改回 `true` 即可在该容器内同时跑 etcd
+  （每个容器一个 etcd 成员，只需 3 个容器；生产不推荐）
 
+> 宿主机 Docker 内置 DNS 在本环境不可用，集群全部使用固定 IP 通信（`ETCD_HOSTS`、`PATRONI_CONNECT_HOST`）。
 > 集群密码写入 `patroni.yml.tmpl` 的占位符，由 `.env` 注入，不要提交 `.env`（已在 `.gitignore` 中忽略）。
 
 ### 网络规划（避免与其它组件冲突）
@@ -173,7 +189,7 @@ docker exec pg1 patronictl -c /tmp/patroni.yml list
 | 用途 | 网络/桥接名 | IPv4 | IPv6 | 容器 IP |
 | --- | --- | --- | --- | --- |
 | PostgreSQL 单机 | `pg_net` | `172.22.0.0/24`（网关 `.1`） | `fe9a::/64`（网关 `fe9a::1`） | `172.22.0.2` / `fe9a::2` |
-| PostgreSQL 集群 | `pg_cluster_net` | `172.22.1.0/24`（网关 `.1`） | `fe9a:1::/64`（网关 `fe9a:1::1`） | `172.22.1.11~13` / `fe9a:1::11~13` |
+| PostgreSQL 集群 | `pg_cluster_net` | `172.22.1.0/24`（网关 `.1`） | `fe9a:1::/64`（网关 `fe9a:1::1`） | pg `172.22.1.11~13` / `fe9a:1::11~13`，etcd `172.22.1.21~23` / `fe9a:1::21~23` |
 
 同主机其它组件的网段占用（规划时已核对，勿重复使用）：
 
