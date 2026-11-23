@@ -123,6 +123,8 @@ docker compose logs -f postgres
 | 共享内存 | `shm_size: 1gb`（并行查询/大排序需要） |
 | 健康检查 | `pg_isready`，每 30s 一次 |
 | 初始化参数 | `POSTGRES_INITDB_ARGS` 统一使用中文 UTF-8 locale |
+| 自动建库 | 首次初始化后按 `POSTGRES_DB` 创建业务库（库名仅支持字母/数字/下划线/短横线） |
+| 权限处理 | 容器以 root 启动，修正宿主挂载目录属主后自动降权到 `postgres`(26)，无需手工 chown |
 | 自动调优 | 通过 `.env` 的 `PG_MEMORY_LIMIT` / `PG_CPU_LIMIT` / `PG_MAX_CONNECTIONS` 覆盖 |
 | 自定义参数 | 取消注释 `./conf/postgres/99-custom.conf` 挂载，覆盖自动调优结果 |
 
