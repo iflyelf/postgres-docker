@@ -222,7 +222,10 @@ docker build --network host \
 
 ### 多架构构建（不使用 QEMU）
 
-已**取消 QEMU 模拟**，改为两个原生 runner 并行构建，再用 `docker manifest` 合并：
+`amd64` 和 `arm64` 在两个**原生 runner** 上并行构建（`ubuntu-latest` 和 `ubuntu-24.04-arm`），
+各自先推送 `latest-amd64`、`latest-arm64` 这类单架构标签，最后由 `merge` 作业用
+`docker manifest` 合并成多架构清单。整个过程不需要 QEMU 模拟，构建时间从约 2 小时降到 10~20 分钟，
+产出的仍是 Docker v2 manifest list，华为云 SWR 可以正常拉取。
 
 | 架构 | Runner | 说明 |
 | --- | --- | --- |
@@ -243,7 +246,7 @@ docker manifest push --purge <repo>:latest
 > 若仓库为私有（arm runner 需付费），可把 arm64 作业改回
 > `runs-on: ubuntu-latest` + `docker/setup-qemu-action`，或在 `matrix` 中只保留 amd64。
 
-实测耗时（本次构建 #87）：amd64 约 5.6 分钟、arm64 约 6 分钟（两者并行），合并清单约 2 分钟。
+实测耗时（构建 #87）：amd64 约 5.6 分钟、arm64 约 6 分钟（两者并行），合并清单约 2 分钟。
 
 推送目标：
 
