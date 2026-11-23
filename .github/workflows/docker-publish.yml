@@ -21,6 +21,7 @@ on:
     paths:
       - 'Dockerfile'
       - 'scripts/**'
+      - 'conf/**'
       - '.github/workflows/docker-publish.yml'
   # 手动触发工作流
   workflow_dispatch:
@@ -89,9 +90,11 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: build-context
+        # 必须与 Dockerfile 中 COPY 的路径保持一致(新增 COPY 目录时同步修改)
         path: |
           Dockerfile
           scripts/
+          conf/
         retention-days: 1
 
   # ===================================================================
