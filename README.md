@@ -3,30 +3,95 @@
 基于 Ubuntu 的 Percona Distribution for PostgreSQL + TimescaleDB 自定义镜像，
 兼容 Percona Operator for PostgreSQL，内置内存自动计算。
 
+支持 `linux/amd64` 与 `linux/arm64` 多架构，标签为 `latest` 与 PG 大版本号（如 `17`）。
+
 ## 特性
 
-- **基础镜像**：Ubuntu（沿用 [iflyelf/ubuntu-docker](https://github.com/iflyelf/ubuntu-docker) 的 Dockerfile 模板风格）
+- **多阶段构建**：builder = `iflyelf/ubuntu:latest`，runtime = `iflyelf/ubuntu:lite`
 - **PostgreSQL**：Percona Distribution for PostgreSQL（`percona-ppg-server`）
-- **TimescaleDB**：通过 packagecloud apt 源安装（`timescaledb-2-postgresql`）
-- **扩展**：pgvector、pgaudit、pg_stat_monitor、pgbackrest、pgbouncer
-- **HA**：内置 Patroni（pip 安装最新版），兼容 Percona Operator
+- **TimescaleDB**：通过 packagecloud apt 源安装（`timescaledb-2-postgresql`，含 `timescaledb-tune`）
+- **扩展**：pgvector、pgaudit、pg_stat_monitor、pg_repack、wal2json、pgbackrest、pgbouncer、pgbadger
+- **HA**：内置 Patroni（独立 venv `/opt/patroni`，版本固定并自动跟进），兼容 Percona Operator
 - **内存自动计算**：容器启动时按 CPU/内存 limit 动态计算 PostgreSQL 参数
-- **多架构**：linux/amd64 + linux/arm64
-- **本地化**：中文 locale（zh_CN.UTF-8）+ Asia/Shanghai 时区
+- **本地化**：中文 locale（zh_CN.UTF-8，另生成 en_US.UTF-8 兼容 Operator）+ Asia/Shanghai 时区
 
-> **版本说明**：TimescaleDB 当前支持到 PostgreSQL 17，故 `PG_MAJOR=17`。
-> PostgreSQL 18 支持后可在构建时通过 `--build-arg PG_MAJOR=18` 升级。
+> **版本说明**：`PG_MAJOR=17`，与现有数据目录保持一致。Percona 与 TimescaleDB 源已提供 PG 18，
+> 升级需先用 `pg_upgrade` 迁移数据目录，再通过 `--build-arg PG_MAJOR=18` 构建。
+
+## 多阶段构建
+
+| 阶段 | 基础镜像 | 作用 |
+| --- | --- | --- |
+| builder | `iflyelf/ubuntu:latest` | 已预装 Python / pip / gpg / curl 等完整工具链：生成 Percona 与 TimescaleDB 的 apt 源及签名密钥、下载并 GPG 校验 gosu、在 venv 中 pip 安装 Patroni |
+| runtime | `iflyelf/ubuntu:lite` | 拷贝 apt 源、gosu、Patroni venv，仅 apt 安装 PostgreSQL 及运行依赖，镜像更小 |
+
+构建产物（builder → runtime）：
+
+| 产物 | 路径 |
+| --- | --- |
+| Percona / TimescaleDB apt 源 | `/etc/apt/sources.list.d/percona-*.list`、`timescaledb.list` |
+| 签名密钥（`signed-by`，不写入全局 trusted.gpg） | `/usr/share/keyrings/percona-keyring.gpg`、`timescaledb.gpg` |
+| gosu | `/usr/local/bin/gosu` |
+| Patroni venv | `/opt/patroni`（`patroni`、`patronictl` 软链到 `/usr/local/bin`） |
+
+运行阶段在 `ubuntu:lite` 基础上补装的依赖：
+
+| 依赖 | 用途 |
+| --- | --- |
+| `python3` | Patroni venv 解释器 |
+| `python3-yaml`、`python3-psycopg2` | Operator 侧可能调用的系统 python 脚本 |
+| `libnss-wrapper` | Operator 以任意 UID 运行时伪造 passwd（软链到 `/usr/lib64/libnss_wrapper.so`） |
+| `sudo` | postgres 用户受限提权（mkdir/chmod/chown/psql/pg_dump） |
+| `libdbd-pg-perl`、`libdbi-perl` | pgbadger 等 perl 工具 |
+| `ssl-cert`、`lsb-release` | postgresql-common 依赖 |
+| `rsync`、`zstd`、`xz-utils`、`numactl`、`net-tools`、`ncat`、`debsums` | 备份恢复与诊断工具 |
+| `locales`、`tzdata`、`ca-certificates` | 本地化、时区、TLS 根证书 |
+
+运行阶段环境变量：
+
+| 变量 | 默认值 |
+| --- | --- |
+| `PG_MAJOR` | `17` |
+| `PGHOME` / `PGDATA` | `/data/postgres` / `/data/postgres/data` |
+| `PATH` | 追加 `/usr/lib/postgresql/${PG_MAJOR}/bin` 与 `/opt/patroni/bin` |
+| `PATRONI_HOME` / `PATRONI_VERSION` / `GOSU_VERSION` | Patroni venv 路径与组件版本 |
+| `LANG` / `TZ` | `zh_CN.UTF-8` / `Asia/Shanghai` |
+
+构建末尾会自检 `gosu`、`patroni`、`patronictl`、`postgres`、`pgbackrest`、`pgbouncer` 可执行，
+并校验 `timescaledb.so`、`pg_stat_monitor.so`、`vector.so` 存在，任一缺失则构建失败。
 
 ## 目录结构
 
 ```
-docker-image/
-├── Dockerfile                          # 镜像构建文件
+postgres-docker/
+├── Dockerfile                          # 多阶段构建文件
 ├── scripts/
 │   ├── docker-entrypoint.sh            # 容器入口（内存计算 + Patroni 集成）
-│   └── postgresql-config-tuner.sh      # 内存/CPU 自动计算脚本
+│   ├── postgresql-config-tuner.sh      # 内存/CPU 自动计算脚本
+│   └── update-version.sh               # 组件版本号同步脚本（GitHub API）
 └── .github/workflows/
-    └── docker-publish.yml              # GitHub Actions 自动构建
+    ├── docker-publish.yml              # 构建并推送 Docker Hub + 华为云 SWR
+    └── update-version.yml              # 每日自动更新版本号
+```
+
+## 镜像获取
+
+```bash
+# Docker Hub（国外）
+docker pull iflyelf/postgres:latest
+
+# 华为云 SWR（国内推荐）
+docker pull swr.cn-east-3.myhuaweicloud.com/iflyelf/postgres:latest
+```
+
+## 运行
+
+```bash
+docker run -d --name postgres \
+  -e POSTGRES_PASSWORD=change_me \
+  -p 5432:5432 \
+  -v pgdata:/data/postgres \
+  iflyelf/postgres:latest
 ```
 
 ## 内存自动计算
@@ -77,26 +142,69 @@ PG_MEMORY_LIMIT=8Gi PG_CPU_LIMIT=4 ./scripts/postgresql-config-tuner.sh conf
 docker build -t iflyelf/postgres:latest .
 
 # 指定 PG 版本
-docker build --build-arg PG_MAJOR=17 -t iflyelf/postgres:pg17 .
+docker build --build-arg PG_MAJOR=17 -t iflyelf/postgres:17 .
 
-# 多架构构建并推送（需 buildx）
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -t iflyelf/postgres:latest --push .
+# 构建环境需代理时（容器内 DNS 不通的场景）
+docker build --network host \
+  --build-arg HTTP_PROXY=http://<proxy>:7890 \
+  --build-arg HTTPS_PROXY=http://<proxy>:7890 \
+  -t iflyelf/postgres:latest .
 ```
 
 ## 自动构建（GitHub Actions）
 
-`.github/workflows/docker-publish.yml` 触发条件：
-- push 修改 `Dockerfile` 或 `scripts/**`
+### 镜像构建 `docker-publish.yml`
+
+触发条件：
+- push 修改 `Dockerfile`、`scripts/**` 或工作流本身
 - 手动触发（workflow_dispatch）
-- 每天定时构建（cron，保持所有模块最新）
+- 每天中国时间早 5 点定时构建（跟进 apt 源中 PG 小版本、TimescaleDB 等更新）
 - Star 触发（watch）
 
-需在仓库 Secrets 配置：
-- `DOCKER_USERNAME`：DockerHub 用户名
-- `DOCKER_PASSWORD`：DockerHub 访问令牌
+同一分支只保留最新一次构建（`concurrency` + `cancel-in-progress`），快速连续提交时自动取消旧构建。
 
-推送镜像标签：`<DOCKER_USERNAME>/postgres:latest`
+作业流程：
+
+1. **prepare**：执行 `scripts/update-version.sh` 同步版本号并提交，读取 `PG_MAJOR`
+2. **build**：amd64（`ubuntu-latest`）与 arm64（`ubuntu-24.04-arm`）并行原生构建，
+   推送 `latest-<arch>` / `<PG_MAJOR>-<arch>` 单架构标签，每架构独立 GHA 缓存
+3. **merge**：用 `docker manifest` 合并为多架构清单 `latest` 与 `<PG_MAJOR>`
+   （Docker v2 manifest list，兼容华为云 SWR），并调用 SWR API 将仓库设为公开
+
+推送目标：
+
+| 仓库 | 镜像 |
+| --- | --- |
+| Docker Hub | `<DOCKER_USERNAME>/postgres:latest`、`<DOCKER_USERNAME>/postgres:17` |
+| 华为云 SWR | `swr.cn-east-3.myhuaweicloud.com/iflyelf/postgres:latest`、`:17` |
+
+### 版本自动更新 `update-version.yml`
+
+每天中国时间早 4 点（早于构建）通过 GitHub API 获取最新**稳定** release（排除 prerelease/draft
+与 rc/beta/alpha 等，只升不降），更新 Dockerfile 中的 `ARG` 并自动提交：
+
+| ARG | 来源 |
+| --- | --- |
+| `GOSU_VERSION` | [tianon/gosu](https://github.com/tianon/gosu) |
+| `PATRONI_VERSION` | [patroni/patroni](https://github.com/patroni/patroni) |
+
+不自动更新的部分：
+- `PG_MAJOR`：跨大版本需 `pg_upgrade`，必须人工评估
+- PostgreSQL 小版本、TimescaleDB、pgvector 等：由 apt 源在每次构建时自动取最新
+
+本地检查：
+
+```bash
+GH_TOKEN=<可选, 提高 API 限额> bash scripts/update-version.sh
+```
+
+### 所需 Secrets
+
+| Secret | 说明 |
+| --- | --- |
+| `DOCKER_USERNAME` / `DOCKER_PASSWORD` | Docker Hub 凭据 |
+| `SWR_USERNAME` / `SWR_PASSWORD` | 华为云 SWR 登录凭据（`区域@AK` / 登录密钥） |
+| `SWR_AK` / `SWR_SK` | 华为云账号 AK/SK，用于将 SWR 仓库设为公开（可选） |
 
 ## 与 Percona Operator 集成
 
@@ -106,6 +214,9 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 3. **独立 postgres**：initdb + 加载扩展 + 启动（本地测试用）
 
 在 pg-cluster 的 `values-custom.yaml` 中通过 `image: docker.io/iflyelf/postgres:latest`
-引用。注意：Operator 环境下 Patroni 的 `dynamicConfiguration.postgresql.parameters`
+（国内可用 `swr.cn-east-3.myhuaweicloud.com/iflyelf/postgres:latest`）引用。
+注意：Operator 环境下 Patroni 的 `dynamicConfiguration.postgresql.parameters`
 优先级最高，会覆盖镜像内 tuner 写入的 include 配置，因此 values 中的内存参数需按
 `instances.resources.limits.memory` 手动计算（或参考 tuner 公式）。
+
+postgres 用户固定为 UID/GID `26`（对齐 Percona 官方镜像），保证 pgBackRest sidecar 可读取数据文件。

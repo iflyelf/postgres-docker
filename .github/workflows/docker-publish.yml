@@ -1,5 +1,5 @@
 #=================================================
-# https://github.com/iflyelf/ubuntu-docker
+# https://github.com/iflyelf/postgres-docker
 # Lisence: MIT
 # Author: iflyelf
 # Blog: https://www.xiaonuo.live
@@ -7,15 +7,21 @@
 
 name: 自动编译并上传镜像
 
+# 镜像推送目标（华为云 SWR: 国内可访问, 与 Docker Hub 同时推送）
+# 组织名称可直接修改, 凭据通过 Secrets: SWR_USERNAME / SWR_PASSWORD
+env:
+  IMAGE_NAME: postgres
+  SWR_REGISTRY: swr.cn-east-3.myhuaweicloud.com
+  SWR_ORGANIZATION: iflyelf
+
 # 设置触发条件
 on:
-  # 仓库触发工作流
-  # repository_dispatch:
   # 编辑文件触发开始编译
   push:
     paths:
       - 'Dockerfile'
       - 'scripts/**'
+      - '.github/workflows/docker-publish.yml'
   # 手动触发工作流
   workflow_dispatch:
     inputs:
@@ -23,46 +29,101 @@ on:
         description: 'build postgres'
         required: true
         default: 'build postgres'
-  # 定时触发编译(每天早5点，保持所有模块最新)
+  # 定时触发编译(中国时间每天早5点, UTC 前一天21点; 跟进 apt 源中 PG 小版本/TimescaleDB 更新)
   schedule:
-     - cron: '0 21 * * *'
+    - cron: '0 21 * * *'
   # 点☆Star触发开始编译
   watch:
      types: [started]
 
- # 任务集
+# 同一分支仅保留最新一次构建：快速连续提交时自动取消旧构建，
+# 避免多个多架构构建并发堆积、互相拖慢导致镜像迟迟不更新。
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build:
-    # 选择虚拟环境
+  # ===================================================================
+  # 1) 先同步 gosu / Patroni 最新版本号, 再构建(避免版本号不是最新)
+  # ===================================================================
+  prepare:
+    name: 同步版本号
     runs-on: ubuntu-latest
-    if: github.event.repository.owner.id == github.event.sender.id
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - DOCKER_TAG: latest
-
-    # 权限
+    if: github.event_name == 'schedule' || github.event.repository.owner.id == github.event.sender.id
     permissions:
-      actions: write
-      contents: read
-
-    # 运行步骤
+      contents: write
+    outputs:
+      pg_major: ${{ steps.pgver.outputs.pg_major }}
     steps:
-
-    # 检出master分支
-    - name: 检出各个模块代码
+    - name: 检出代码
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
-    - name: 安装 QEMU
-      uses: docker/setup-qemu-action@v3
+    - name: 同步组件最新版本号
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: bash scripts/update-version.sh
+
+    - name: 提交版本号更新
+      if: env.CHANGED == '1'
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add Dockerfile
+        git commit -m "chore: 自动更新组件版本号${SUMMARY}"
+        # 推送失败不影响本次构建(镜像仍基于更新后的本地文件构建)
+        git push || echo "::warning::版本更新推送失败, 本次构建仍使用更新后的本地文件"
+
+    - name: 读取 PG 大版本号
+      id: pgver
+      run: |
+        PG_MAJOR=$(grep -oP '^ARG PG_MAJOR=\K.*' Dockerfile | head -1)
+        [ -n "${PG_MAJOR}" ] || { echo "ERROR: 未读取到 PG_MAJOR"; exit 1; }
+        echo "检测到 PG 大版本: ${PG_MAJOR}"
+        echo "pg_major=${PG_MAJOR}" >> "$GITHUB_OUTPUT"
+
+    # 上传本次(可能已更新版本号的)Dockerfile, 供 build 作业使用,
+    # 避免 push 失败时 build 作业检出到旧文件
+    - name: 上传构建上下文
+      uses: actions/upload-artifact@v4
       with:
-        platforms: all
+        name: build-context
+        path: |
+          Dockerfile
+          scripts/
+        retention-days: 1
+
+  # ===================================================================
+  # 2) 双架构并行原生构建(不使用 QEMU 模拟)
+  #    - amd64: ubuntu-latest (x64 原生)
+  #    - arm64: ubuntu-24.04-arm (arm64 原生, public 仓库免费)
+  #    每个架构先推送带后缀的单架构标签, 由 merge 作业合并成多架构清单
+  # ===================================================================
+  build:
+    name: 构建 ${{ matrix.arch }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+    - name: 下载构建上下文
+      uses: actions/download-artifact@v4
+      with:
+        name: build-context
 
     - name: 安装 docker buildx
-      id: buildx
       uses: docker/setup-buildx-action@v3
       with:
         version: latest
@@ -73,18 +134,130 @@ jobs:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
 
-    - name: 构建镜像并发布
+    - name: 登录华为云 SWR
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.SWR_REGISTRY }}
+        username: ${{ secrets.SWR_USERNAME }}
+        password: ${{ secrets.SWR_PASSWORD }}
+
+    - name: 构建单架构镜像并推送
       uses: docker/build-push-action@v6
+      # 华为云 SWR 不支持 OCI media types 与证明清单(attestation)，
+      # 关闭 provenance/sbom 并输出 Docker 媒体类型以兼容 SWR。
       with:
         context: .
         file: ./Dockerfile
-        platforms: linux/amd64,linux/arm64
+        platforms: ${{ matrix.platform }}
         push: true
-        tags: ${{ secrets.DOCKER_USERNAME }}/postgres:${{ matrix.DOCKER_TAG }}
+        provenance: false
+        sbom: false
+        outputs: type=image,oci-mediatypes=false
+        tags: |
+          ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
+          ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.pg_major }}-${{ matrix.arch }}
+          ${{ env.SWR_REGISTRY }}/${{ env.SWR_ORGANIZATION }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
+          ${{ env.SWR_REGISTRY }}/${{ env.SWR_ORGANIZATION }}/${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.pg_major }}-${{ matrix.arch }}
+        # 每架构独立缓存作用域, 避免互相覆盖
+        cache-from: type=gha,scope=${{ env.IMAGE_NAME }}-${{ matrix.arch }}
+        cache-to: type=gha,mode=min,scope=${{ env.IMAGE_NAME }}-${{ matrix.arch }},ignore-error=true
+
+  # ===================================================================
+  # 3) 合并单架构镜像为多架构清单(使用 docker manifest, 产出 Docker v2
+  #    manifest list, 与华为云 SWR 兼容; buildx imagetools 会产出 OCI index)
+  # ===================================================================
+  merge:
+    name: 合并多架构清单
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+    - name: 登录 DockerHub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: 登录华为云 SWR
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.SWR_REGISTRY }}
+        username: ${{ secrets.SWR_USERNAME }}
+        password: ${{ secrets.SWR_PASSWORD }}
+
+    - name: 生成并推送多架构清单
+      env:
+        DOCKERHUB_REPO: ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}
+        SWR_REPO: ${{ env.SWR_REGISTRY }}/${{ env.SWR_ORGANIZATION }}/${{ env.IMAGE_NAME }}
+        PG_MAJOR: ${{ needs.prepare.outputs.pg_major }}
+      run: |
+        set -euo pipefail
+        export DOCKER_CLI_EXPERIMENTAL=enabled
+        [ -n "${PG_MAJOR}" ] || { echo "ERROR: PG_MAJOR 为空"; exit 1; }
+        for repo in "${DOCKERHUB_REPO}" "${SWR_REPO}"; do
+          for tag in latest "${PG_MAJOR}"; do
+            echo "==> ${repo}:${tag}  <=  ${tag}-amd64 + ${tag}-arm64"
+            docker manifest create "${repo}:${tag}" --amend \
+              "${repo}:${tag}-amd64" \
+              "${repo}:${tag}-arm64"
+            docker manifest push --purge "${repo}:${tag}"
+          done
+        done
+        echo "多架构清单合并完成"
+
+    - name: 校验多架构清单
+      env:
+        DOCKERHUB_REPO: ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}
+        SWR_REPO: ${{ env.SWR_REGISTRY }}/${{ env.SWR_ORGANIZATION }}/${{ env.IMAGE_NAME }}
+      run: |
+        set -euo pipefail
+        export DOCKER_CLI_EXPERIMENTAL=enabled
+        for repo in "${DOCKERHUB_REPO}" "${SWR_REPO}"; do
+          echo "===== ${repo}:latest ====="
+          docker manifest inspect "${repo}:latest" \
+            | jq -r '.manifests[] | "  \(.platform.architecture)/\(.platform.os)"'
+        done
+
+    # 华为云 SWR 镜像仓库默认私有，push 后调用 SWR API 设为公开
+    # 需 Secrets: SWR_AK / SWR_SK（华为云账号 AK/SK，具备 swr:repo:updateRepo 权限）
+    - name: 设置 SWR 镜像为公开
+      env:
+        CLOUD_SDK_AK: ${{ secrets.SWR_AK }}
+        CLOUD_SDK_SK: ${{ secrets.SWR_SK }}
+        SWR_REGION: cn-east-3
+        SWR_ORGANIZATION: ${{ env.SWR_ORGANIZATION }}
+        SWR_REPOSITORY: ${{ env.IMAGE_NAME }}
+      run: |
+        if [ -z "$CLOUD_SDK_AK" ] || [ -z "$CLOUD_SDK_SK" ]; then
+          echo "未配置 SWR_AK / SWR_SK，跳过设置公开"
+          exit 0
+        fi
+        pip install --quiet huaweicloudsdkcore huaweicloudsdkswr
+        python - <<'PY'
+        import os
+        from huaweicloudsdkcore.auth.credentials import BasicCredentials
+        from huaweicloudsdkswr.v2.region.swr_region import SwrRegion
+        from huaweicloudsdkswr.v2 import SwrClient
+        from huaweicloudsdkswr.v2.model import UpdateRepoRequest, UpdateRepoRequestBody
+
+        client = SwrClient.new_builder() \
+            .with_credentials(BasicCredentials(os.environ["CLOUD_SDK_AK"], os.environ["CLOUD_SDK_SK"])) \
+            .with_region(SwrRegion.value_of(os.environ["SWR_REGION"])) \
+            .build()
+
+        req = UpdateRepoRequest()
+        req.namespace = os.environ["SWR_ORGANIZATION"]
+        req.repository = os.environ["SWR_REPOSITORY"]
+        req.body = UpdateRepoRequestBody(is_public=True)
+        client.update_repo(req)
+        print(f"✅ 已设为公开: {req.namespace}/{req.repository}")
+        PY
 
     - name: 删除旧的GitHub-workflow
       uses: Mattraks/delete-workflow-runs@main
       with:
         repository: ${{ github.repository }}
         retain_days: 1
-        keep_minimum_runs: 0    #保留多少个workflow不删除
+        keep_minimum_runs: 3    #保留多少个workflow不删除

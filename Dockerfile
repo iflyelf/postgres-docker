@@ -1,12 +1,103 @@
-#############################
-#     设置公共的变量         #
-#############################
-ARG BASE_IMAGE_TAG=resolute
-FROM ubuntu:${BASE_IMAGE_TAG}
+#############################################################################
+#  iflyelf/postgres (Percona PostgreSQL + TimescaleDB + Patroni) 多阶段构建
+#  - builder(构建阶段) = iflyelf/ubuntu:latest
+#      已预装 Python / pip / gpg / curl 等完整工具链, 在此完成:
+#        1. 生成 Percona / TimescaleDB 的 apt 源与签名密钥
+#        2. 下载并 GPG 校验 gosu
+#        3. 在独立 venv(/opt/patroni) 中 pip 安装 Patroni
+#  - runtime(运行阶段) = iflyelf/ubuntu:lite
+#      拷贝上述构建产物, 仅通过 apt 安装 PostgreSQL 及其运行依赖, 镜像更小。
+#############################################################################
 
-# 作者描述信息
+# ========================= 全局版本变量(两个阶段共享) =========================
+# PG 大版本(保持与线上数据目录一致; 跨大版本升级需 pg_upgrade)
+ARG PG_MAJOR=17
+# gosu     https://github.com/tianon/gosu
+ARG GOSU_VERSION=1.20
+# Patroni  https://github.com/patroni/patroni
+ARG PATRONI_VERSION=4.1.5
+
+# 公共路径
+ARG PATRONI_HOME=/opt/patroni
+
+
+####################################################################
+#                     构建阶段 (builder)                            #
+####################################################################
+FROM iflyelf/ubuntu:latest AS builder
+
 LABEL org.opencontainers.image.authors="iflyelf" \
       org.opencontainers.image.vendor="iflyelf"
+
+# buildx 自动注入的目标架构
+ARG TARGETARCH
+ARG TARGETVARIANT
+
+# 继承全局版本变量
+ARG PG_MAJOR
+ARG GOSU_VERSION
+ARG PATRONI_VERSION
+ARG PATRONI_HOME
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# ***** 1. 生成 Percona / TimescaleDB apt 源(产物: keyrings + sources.list.d) *****
+RUN set -eux && \
+    CODENAME="$(lsb_release -sc)" && \
+    mkdir -p /out/keyrings /out/sources && \
+    # Percona: 通过官方 percona-release 工具生成 ppg-${PG_MAJOR} 源
+    wget -q https://repo.percona.com/apt/percona-release_latest.generic_all.deb -O /tmp/percona-release.deb && \
+    dpkg -i /tmp/percona-release.deb && \
+    percona-release setup ppg-${PG_MAJOR} && \
+    cp /usr/share/keyrings/percona-keyring.gpg /out/keyrings/ && \
+    cp /etc/apt/sources.list.d/percona-*.list /out/sources/ && \
+    # TimescaleDB: packagecloud 源(signed-by 独立密钥, 不污染全局 trusted.gpg)
+    curl -fsSL https://packagecloud.io/timescale/timescaledb/gpgkey | gpg --dearmor -o /out/keyrings/timescaledb.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/timescaledb.gpg] https://packagecloud.io/timescale/timescaledb/ubuntu/ ${CODENAME} main" \
+        > /out/sources/timescaledb.list && \
+    # 提前校验源中存在所需包, 避免运行阶段才失败
+    cp /out/keyrings/timescaledb.gpg /usr/share/keyrings/ && \
+    cp /out/sources/timescaledb.list /etc/apt/sources.list.d/ && \
+    apt-get update -qq && \
+    for pkg in percona-ppg-server-${PG_MAJOR} timescaledb-2-postgresql-${PG_MAJOR}; do \
+        apt-cache show "$pkg" > /dev/null || { echo "ERROR: 源中缺少 $pkg" >&2; exit 1; }; \
+    done && \
+    rm -rf /var/lib/apt/lists/* /tmp/percona-release.deb
+
+# ***** 2. 下载并校验 gosu(产物: /out/gosu) *****
+RUN set -eux && \
+    dpkgArch="$(dpkg --print-architecture | awk -F- '{ print $NF }')" && \
+    wget -q -O /out/gosu "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${dpkgArch}" && \
+    wget -q -O /tmp/gosu.asc "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${dpkgArch}.asc" && \
+    export GNUPGHOME="$(mktemp -d)" && \
+    gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4 && \
+    gpg --batch --verify /tmp/gosu.asc /out/gosu && \
+    gpgconf --kill all && \
+    rm -rf "$GNUPGHOME" /tmp/gosu.asc && \
+    chmod +x /out/gosu && \
+    /out/gosu --version
+
+# ***** 3. 安装 Patroni 到独立 venv(产物: ${PATRONI_HOME}) *****
+# builder 与 runtime 同为 Ubuntu resolute, 系统 python3 版本一致, venv 可直接拷贝复用
+RUN set -eux && \
+    python3 -m venv ${PATRONI_HOME} && \
+    ${PATRONI_HOME}/bin/pip install --no-cache-dir --upgrade pip && \
+    ${PATRONI_HOME}/bin/pip install --no-cache-dir \
+        "patroni[psycopg3]==${PATRONI_VERSION}" \
+        python-json-logger && \
+    ${PATRONI_HOME}/bin/patroni --version && \
+    # 清理字节码缓存, 减小体积
+    find ${PATRONI_HOME} -name '__pycache__' -type d -prune -exec rm -rf {} +
+
+
+####################################################################
+#                     运行阶段 (runtime)                            #
+####################################################################
+FROM iflyelf/ubuntu:lite
+
+LABEL org.opencontainers.image.authors="iflyelf" \
+      org.opencontainers.image.vendor="iflyelf" \
+      org.opencontainers.image.description="Percona PostgreSQL + TimescaleDB + Patroni, runtime on ubuntu:lite"
 
 ARG TARGETARCH
 ARG TARGETVARIANT
@@ -23,17 +114,25 @@ ARG DOCKER_IMAGE=iflyelf/postgres
 ENV DOCKER_IMAGE=$DOCKER_IMAGE
 ARG DOCKER_IMAGE_OS=ubuntu
 ENV DOCKER_IMAGE_OS=$DOCKER_IMAGE_OS
-ARG DOCKER_IMAGE_TAG=resolute
+ARG DOCKER_IMAGE_TAG=latest
 ENV DOCKER_IMAGE_TAG=$DOCKER_IMAGE_TAG
 
 # 环境设置
 ARG DEBIAN_FRONTEND=noninteractive
 ENV DEBIAN_FRONTEND=$DEBIAN_FRONTEND
 
-# PG 版本号（TimescaleDB 当前支持到 PG 17，保持最新可用组合）
-ARG PG_MAJOR=17
+# 继承全局版本变量
+ARG PG_MAJOR
 ENV PG_MAJOR=$PG_MAJOR
-ENV PATH=$PATH:/usr/lib/postgresql/$PG_MAJOR/bin
+ARG GOSU_VERSION
+ENV GOSU_VERSION=$GOSU_VERSION
+ARG PATRONI_VERSION
+ENV PATRONI_VERSION=$PATRONI_VERSION
+ARG PATRONI_HOME
+ENV PATRONI_HOME=$PATRONI_HOME
+
+# PG 可执行文件 + Patroni venv 加入 PATH
+ENV PATH=$PATH:/usr/lib/postgresql/$PG_MAJOR/bin:$PATRONI_HOME/bin
 
 # 工作目录
 ARG PGHOME=/data/postgres
@@ -42,52 +141,33 @@ ENV PGHOME=$PGHOME
 ARG PGDATA=/data/postgres/data
 ENV PGDATA=$PGDATA
 
-# 源文件下载路径
-ARG DOWNLOAD_SRC=/tmp
-ENV DOWNLOAD_SRC=$DOWNLOAD_SRC
-
-# 系统基础依赖包
+# 运行依赖(ubuntu:lite 未包含的部分)
+#   python3                       -> Patroni venv 解释器
+#   python3-yaml/python3-psycopg2 -> 兼容 Operator 侧可能调用的系统 python 脚本
+#   libnss-wrapper                -> Operator 以任意 UID 运行时伪造 passwd
+#   sudo                          -> postgres 用户受限提权(mkdir/chmod/chown)
+#   libdbd-pg-perl/libdbi-perl    -> pgbadger 等 perl 工具
+#   ssl-cert/lsb-release          -> postgresql-common 依赖与脚本识别发行版
+#   rsync/zstd/numactl/...        -> 备份/恢复与诊断工具
 ARG PKG_DEPS="\
-    zsh \
-    bash \
-    bash-completion \
-    sudo \
-    bind9-dnsutils \
-    iproute2 \
-    net-tools \
-    ncat \
-    git \
-    vim \
-    tzdata \
-    curl \
-    wget \
-    axel \
-    lsof \
-    zip \
-    unzip \
-    rsync \
-    iputils-ping \
-    telnet \
-    procps \
-    numactl \
-    xz-utils \
-    zstd \
-    libnss-wrapper \
-    gnupg2 \
-    psmisc \
-    debsums \
-    locales \
-    language-pack-zh-hans \
-    lsb-release \
-    libpq5 \
-    ssl-cert \
-    libdbd-pg-perl \
-    libdbi-perl \
-    perl-modules \
     python3 \
-    python3-pip \
     python3-yaml \
     python3-psycopg2 \
+    libnss-wrapper \
+    sudo \
+    libdbd-pg-perl \
+    libdbi-perl \
+    ssl-cert \
+    lsb-release \
+    rsync \
+    zstd \
+    xz-utils \
+    numactl \
+    net-tools \
+    ncat \
+    debsums \
+    locales \
+    tzdata \
     ca-certificates"
 ENV PKG_DEPS=$PKG_DEPS
 
@@ -100,105 +180,66 @@ ARG PPG_DEPS="\
     percona-pgbadger"
 ENV PPG_DEPS=$PPG_DEPS
 
-# TimescaleDB 依赖包
+# TimescaleDB 依赖包(lite 默认不装 recommends, 显式安装 timescaledb-tools 提供 timescaledb-tune)
 ARG TB_DEPS="\
     timescaledb-2-loader-postgresql-${PG_MAJOR} \
-    timescaledb-2-postgresql-${PG_MAJOR}"
+    timescaledb-2-postgresql-${PG_MAJOR} \
+    timescaledb-tools"
 ENV TB_DEPS=$TB_DEPS
 
-# Patroni（通过 pip 安装最新版本，兼容 Percona Operator）
-ARG PATRONI_DEPS="\
-    patroni[psycopg3] \
-    python-json-logger"
-ENV PATRONI_DEPS=$PATRONI_DEPS
+# ***** 拷贝构建产物: apt 源 + 密钥 *****
+COPY --from=builder /out/keyrings/ /usr/share/keyrings/
+COPY --from=builder /out/sources/  /etc/apt/sources.list.d/
 
-# ***** 安装依赖 *****
+# ***** 安装运行依赖 + Percona PostgreSQL + TimescaleDB *****
 RUN set -eux && \
-   # 更新源地址（deb822 格式，适配 Ubuntu 24.04+）
-   sed -i 's@URIs: http://[a-z.]*\.ubuntu\.com/ubuntu/@URIs: https://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list.d/ubuntu.sources && \
-   sed -i 's@^Types: deb$@Types: deb deb-src@' /etc/apt/sources.list.d/ubuntu.sources && \
-   # 解决证书认证失败问题
-   touch /etc/apt/apt.conf.d/99verify-peer.conf && echo >>/etc/apt/apt.conf.d/99verify-peer.conf "Acquire { https::Verify-Peer false }" && \
-   # 更新系统软件
-   DEBIAN_FRONTEND=noninteractive apt-get update -qqy && apt-get upgrade -qqy && \
-   # 安装系统依赖包
-   DEBIAN_FRONTEND=noninteractive apt-get install -qqy --no-install-recommends $PKG_DEPS --option=Dpkg::Options::=--force-confdef && \
-   DEBIAN_FRONTEND=noninteractive apt-get -qqy --no-install-recommends autoremove --purge && \
-   DEBIAN_FRONTEND=noninteractive apt-get -qqy --no-install-recommends autoclean && \
-   rm -rf /var/lib/apt/lists/* && \
-   # 更新时区
-   ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime && \
-   echo ${TZ} > /etc/timezone && \
-   # sudo 权限（PostgreSQL 运行用户需要特定权限）
-   sed -i 's/^Defaults.*.requiretty/#Defaults    requiretty/' /etc/sudoers && \
-   sed -i '$a\postgres  ALL=(ALL)  NOPASSWD:/bin/mkdir,/bin/chmod,/bin/chown,/usr/bin/psql,/usr/bin/pg_dump' /etc/sudoers && \
-   # 更改为 zsh
-   sh -c "$(curl -fsSL https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" || true && \
-   sed -i -e "s/bin\/ash/bin\/zsh/" /etc/passwd && \
-   # vim 默认配置文件存在时才关闭 mouse（不同版本路径不同，用 find 定位）
-   find /usr/share/vim -name defaults.vim -exec sed -i -e 's/mouse=/mouse-=/g' {} + && \
-   # 配置 locale（生成 zh_CN.UTF-8 和 en_US.UTF-8，兼容 Percona Operator）
-   locale-gen zh_CN.UTF-8 && localedef -f UTF-8 -i zh_CN zh_CN.UTF-8 && \
-   locale-gen en_US.UTF-8 && localedef -f UTF-8 -i en_US en_US.UTF-8 && \
-   locale-gen && \
-   # 创建 libnss_wrapper.so 软链接到 Operator 期望的 /usr/lib64 路径
-   # Percona Operator 硬编码 LD_PRELOAD=/usr/lib64/libnss_wrapper.so（RHEL 路径），
-   # 但 Ubuntu 装在 /usr/lib/<arch>/ 下，需软链接以消除 LD_PRELOAD 加载失败告警
-   mkdir -p /usr/lib64 && \
-   NSS_WRAPPER_LIB="$(find /usr/lib -name 'libnss_wrapper.so' 2>/dev/null | head -1)" && \
-   ln -sf "${NSS_WRAPPER_LIB}" /usr/lib64/libnss_wrapper.so
+    apt-get update -qqy && \
+    apt-get install -qqy --no-install-recommends $PKG_DEPS $PPG_DEPS $TB_DEPS --option=Dpkg::Options::=--force-confdef && \
+    # 逐个校验依赖包是否安装成功
+    for pkg in $PKG_DEPS $PPG_DEPS $TB_DEPS; do \
+        if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed"; then \
+            echo "ERROR: 依赖包未成功安装: $pkg" >&2 && exit 1; \
+        fi; \
+    done && \
+    echo "所有依赖包验证通过" && \
+    apt-get -qqy autoremove --purge && \
+    apt-get -qqy autoclean && \
+    # 时区
+    ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime && \
+    echo ${TZ} > /etc/timezone && \
+    # locale: zh_CN.UTF-8 + en_US.UTF-8(兼容 Percona Operator)
+    sed -i -e 's/^# *\(zh_CN.UTF-8 UTF-8\)/\1/' -e 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen && \
+    locale-gen zh_CN.UTF-8 en_US.UTF-8 && \
+    # sudo 权限(PostgreSQL 运行用户需要特定权限)
+    sed -i 's/^Defaults.*.requiretty/#Defaults    requiretty/' /etc/sudoers && \
+    sed -i '$a\postgres  ALL=(ALL)  NOPASSWD:/bin/mkdir,/bin/chmod,/bin/chown,/usr/bin/psql,/usr/bin/pg_dump' /etc/sudoers && \
+    # Percona Operator 硬编码 LD_PRELOAD=/usr/lib64/libnss_wrapper.so(RHEL 路径),
+    # Ubuntu 装在 /usr/lib/<arch>/ 下, 需软链接以消除 LD_PRELOAD 加载失败告警
+    mkdir -p /usr/lib64 && \
+    NSS_WRAPPER_LIB="$(find /usr/lib -name 'libnss_wrapper.so' 2>/dev/null | head -1)" && \
+    test -n "${NSS_WRAPPER_LIB}" && \
+    ln -sf "${NSS_WRAPPER_LIB}" /usr/lib64/libnss_wrapper.so && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/* /tmp/* /usr/share/man/*
 
-# ***** 安装 Percona PostgreSQL + TimescaleDB *****
-RUN set -eux && \
-    # 下载并安装 Percona 源
-    wget --no-check-certificate https://repo.percona.com/apt/percona-release_latest.$(lsb_release -sc)_all.deb \
-         -O ${DOWNLOAD_SRC}/percona-release_latest.$(lsb_release -sc)_all.deb && \
-    dpkg -i ${DOWNLOAD_SRC}/percona-release_latest.$(lsb_release -sc)_all.deb && \
-    rm ${DOWNLOAD_SRC}/percona-release_latest.$(lsb_release -sc)_all.deb && \
-    # 启用 Percona ppg-${PG_MAJOR} 仓库
-    percona-release setup ppg-${PG_MAJOR} && \
-    # 安装 TimescaleDB 源（从 packagecloud）
-    echo "deb https://packagecloud.io/timescale/timescaledb/ubuntu/ $(lsb_release -c -s) main" | tee /etc/apt/sources.list.d/timescaledb.list && \
-    wget --quiet -O - https://packagecloud.io/timescale/timescaledb/gpgkey | gpg --dearmor -o /etc/apt/trusted.gpg.d/timescaledb.gpg && \
-    # 更新源并安装 Percona PostgreSQL + TimescaleDB
-    DEBIAN_FRONTEND=noninteractive apt-get update -qqy && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y $PPG_DEPS && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y $TB_DEPS && \
-    # 清理
-    DEBIAN_FRONTEND=noninteractive apt-get -qqy --no-install-recommends autoremove --purge && \
-    DEBIAN_FRONTEND=noninteractive apt-get -qqy --no-install-recommends autoclean && \
-    rm -rf /var/lib/apt/lists/*
+# ***** 拷贝构建产物: gosu + Patroni venv *****
+COPY --from=builder /out/gosu /usr/local/bin/gosu
+COPY --from=builder ${PATRONI_HOME} ${PATRONI_HOME}
 
-# ***** 安装 Patroni（兼容 Percona Operator）*****
+# ***** Patroni 命令软链到 /usr/local/bin(与旧版 pip 全局安装路径一致) + 自检 *****
 RUN set -eux && \
-    python3 -m pip config set global.break-system-packages true && \
-    pip3 config set global.index-url http://mirrors.aliyun.com/pypi/simple/ && \
-    pip3 config set install.trusted-host mirrors.aliyun.com && \
-    python3 -m pip install --no-cache-dir $PATRONI_DEPS && \
-    rm -rf /tmp/* /var/lib/apt/lists/*
-
-# ***** grab gosu for easy step-down from root *****
-# https://github.com/tianon/gosu/releases
-ENV GOSU_VERSION=1.17
-RUN set -eux && \
-    savedAptMark="$(apt-mark showmanual)" && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates wget && \
-    rm -rf /var/lib/apt/lists/* && \
-    dpkgArch="$(dpkg --print-architecture | awk -F- '{ print $NF }')" && \
-    wget -O /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$dpkgArch" && \
-    wget -O /usr/local/bin/gosu.asc "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$dpkgArch.asc" && \
-    export GNUPGHOME="$(mktemp -d)" && \
-    gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4 && \
-    gpg --batch --verify /usr/local/bin/gosu.asc /usr/local/bin/gosu && \
-    gpgconf --kill all && \
-    rm -rf "$GNUPGHOME" /usr/local/bin/gosu.asc && \
-    apt-mark auto '.*' > /dev/null && \
-    [ -z "$savedAptMark" ] || apt-mark manual $savedAptMark > /dev/null && \
-    apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false && \
-    chmod +x /usr/local/bin/gosu && \
+    for bin in patroni patronictl patroni_raft_controller patroni_wale_restore patroni_aws patroni_barman; do \
+        [ -x "${PATRONI_HOME}/bin/${bin}" ] && ln -sf "${PATRONI_HOME}/bin/${bin}" /usr/local/bin/${bin} || true; \
+    done && \
     gosu --version && \
-    gosu nobody true
+    gosu nobody true && \
+    patroni --version && \
+    patronictl version && \
+    postgres --version && \
+    pgbackrest version && \
+    pgbouncer --version && \
+    test -f /usr/lib/postgresql/${PG_MAJOR}/lib/timescaledb.so && \
+    test -f /usr/lib/postgresql/${PG_MAJOR}/lib/pg_stat_monitor.so && \
+    test -f /usr/lib/postgresql/${PG_MAJOR}/lib/vector.so
 
 # ***** 配置 postgres 用户与目录 *****
 RUN set -eux && \
@@ -237,11 +278,10 @@ RUN set -eux && \
     sed -i "/listen_addresses/c listen_addresses ='*'" /usr/share/postgresql/${PG_MAJOR}/postgresql.conf.sample
 
 # ***** 拷贝脚本文件 *****
-COPY ["scripts/docker-entrypoint.sh", "/docker-entrypoint.sh"]
-COPY ["scripts/postgresql-config-tuner.sh", "/usr/local/bin/postgresql-config-tuner.sh"]
+COPY --chmod=755 ["scripts/docker-entrypoint.sh", "/docker-entrypoint.sh"]
+COPY --chmod=755 ["scripts/postgresql-config-tuner.sh", "/usr/local/bin/postgresql-config-tuner.sh"]
 
-RUN chmod +x /docker-entrypoint.sh /usr/local/bin/postgresql-config-tuner.sh && \
-    chown postgres:postgres /docker-entrypoint.sh /usr/local/bin/postgresql-config-tuner.sh
+RUN chown postgres:postgres /docker-entrypoint.sh /usr/local/bin/postgresql-config-tuner.sh
 
 # ***** 容器信号处理 *****
 STOPSIGNAL SIGQUIT
