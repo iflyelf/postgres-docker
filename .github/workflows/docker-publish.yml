@@ -199,13 +199,28 @@ jobs:
         set -euo pipefail
         export DOCKER_CLI_EXPERIMENTAL=enabled
         [ -n "${PG_MAJOR}" ] || { echo "ERROR: PG_MAJOR 为空"; exit 1; }
+
+        # 重试包装：华为云 SWR 偶发 TLS handshake timeout / 网络抖动，失败自动重试
+        retry() {
+          local attempts="${RETRY_ATTEMPTS:-4}" i
+          for i in $(seq 1 "${attempts}"); do
+            if "$@"; then return 0; fi
+            echo "::warning::第 ${i}/${attempts} 次执行失败: $*"
+            sleep $((i * 5))
+          done
+          echo "::error::重试 ${attempts} 次仍失败: $*"
+          return 1
+        }
+
         for repo in "${DOCKERHUB_REPO}" "${SWR_REPO}"; do
           for tag in latest "${PG_MAJOR}"; do
             echo "==> ${repo}:${tag}  <=  ${tag}-amd64 + ${tag}-arm64"
-            docker manifest create "${repo}:${tag}" --amend \
+            # 幂等：已存在的清单先删除，避免 --amend 叠加旧平台/旧 digest
+            docker manifest rm "${repo}:${tag}" >/dev/null 2>&1 || true
+            retry docker manifest create "${repo}:${tag}" --amend \
               "${repo}:${tag}-amd64" \
               "${repo}:${tag}-arm64"
-            docker manifest push --purge "${repo}:${tag}"
+            retry docker manifest push --purge "${repo}:${tag}"
           done
         done
         echo "多架构清单合并完成"
@@ -219,8 +234,18 @@ jobs:
         export DOCKER_CLI_EXPERIMENTAL=enabled
         for repo in "${DOCKERHUB_REPO}" "${SWR_REPO}"; do
           echo "===== ${repo}:latest ====="
-          docker manifest inspect "${repo}:latest" \
-            | jq -r '.manifests[] | "  \(.platform.architecture)/\(.platform.os)"'
+          # 单个仓库校验失败(网络抖动)不应让整个构建失败，最多重试 3 次
+          ok=0
+          for i in 1 2 3; do
+            if docker manifest inspect "${repo}:latest" 2>/dev/null \
+                | jq -r '.manifests[] | "  \(.platform.architecture)/\(.platform.os)"'; then
+              ok=1
+              break
+            fi
+            echo "::warning::${repo} 清单校验第 ${i} 次失败，重试..."
+            sleep $((i * 5))
+          done
+          [ "${ok}" = "1" ] || echo "::warning::${repo}:latest 清单校验未通过(可能仍在同步)"
         done
 
     # 华为云 SWR 镜像仓库默认私有，push 后调用 SWR API 设为公开
